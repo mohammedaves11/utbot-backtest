@@ -1,17 +1,18 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- UT BOT — GOLD BACKTESTER  |  XAUUSD M15  |  2 Years
+ EMA CROSS STRATEGY — BACKTESTER  |  GBPUSD M15  |  2 Years
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Mirrors live bot logic exactly:
-  • ATR Trailing Stop  (Key Value × ATR)
-  • RSI Filter         (Buy 45-65 | Sell 35-55)
-  • Strict alternating (Buy → Sell → Buy)
-  • $100 auto risk     (lot = 100 / SL_dist × 100)
-  • SL hit → go flat
+ Mirrors Pine Script logic exactly:
+  • Fast EMA (20) × Slow EMA (50) crossover signals
+  • 200 EMA Trend Filter  (above = buy only / below = sell only)
+  • ADX Choppy Filter     (skip trade when ADX < 15)
+  • SL = Swing Low/High   (lookback 10) ± ATR×0.5 buffer
+  • ATR Trailing SL       (ratchets SL in profit direction each bar)
+  • $100 risk per trade   (lot = risk / (sl_pips × pip_value))
   • $100,000 starting account
  Outputs:
-  • backtest_report.html  — visual report with equity curve + charts
-  • backtest_trades.csv   — full trade-by-trade log
+  • backtest_report_GBPUSD_<ts>.html  — equity curve + charts
+  • backtest_trades_GBPUSD_<ts>.csv   — full trade-by-trade log
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -20,28 +21,39 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import json
-import os
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
-SYMBOL        = "XAUUSD"
-TIMEFRAME     = mt5.TIMEFRAME_M15
-ACCOUNT_SIZE  = 100_000.0      # starting balance USD
-RISK_USD      = 100.0          # fixed risk per trade
-KEY_VALUE     = 3              # UT Bot sensitivity
-ATR_PERIOD    = 14
-USE_HA        = False
-RSI_PERIOD    = 14
-RSI_BUY_LO    = 45
-RSI_BUY_HI    = 65
-RSI_SELL_LO   = 35
-RSI_SELL_HI   = 55
-YEARS_BACK    = 2
-TRAIL_ATR_KEY = KEY_VALUE  # multiplier for in-trade ATR trailing SL (matches UT Bot key by default)
-_RUN_TS       = datetime.now().strftime("%Y%m%d%H%M%S")
-OUTPUT_HTML   = f"backtest_report_{_RUN_TS}.html"
-OUTPUT_CSV    = f"backtest_trades_{_RUN_TS}.csv"
+SYMBOL            = "EURUSD"
+TIMEFRAME         = mt5.TIMEFRAME_M15
+ACCOUNT_SIZE      = 100_000.0        # starting balance USD
+RISK_USD          = 100.0            # fixed risk per trade
+
+# EMA Settings
+FAST_EMA          = 20
+SLOW_EMA          = 50
+TREND_EMA_LEN     = 200
+USE_TREND_FILTER  = True             # only buy above / sell below trend EMA
+
+# ADX Choppy Filter
+USE_ADX           = True
+ADX_LEN           = 10
+ADX_THRESHOLD     = 15.0             # skip trades when ADX < this value
+
+# SL Settings
+ATR_LEN           = 14
+SL_LOOKBACK       = 10               # bars to look back for swing high/low
+ATR_BUFFER        = 0.5              # ATR multiplier added to swing SL
+
+# Forex Pip Sizing  (GBPUSD — USD-quoted pair, USD account)
+PIP_SIZE          = 0.0001
+PIP_VALUE_PER_LOT = 10.0             # USD per pip per standard lot
+
+YEARS_BACK        = 2
+_RUN_TS           = datetime.now().strftime("%Y%m%d%H%M%S")
+OUTPUT_HTML       = f"backtest_report_{SYMBOL}_{_RUN_TS}.html"
+OUTPUT_CSV        = f"backtest_trades_{SYMBOL}_{_RUN_TS}.csv"
 
 # ══════════════════════════════════════════════════════════════
 # DATA FETCH
@@ -72,9 +84,6 @@ def fetch_data():
 # INDICATORS
 # ══════════════════════════════════════════════════════════════
 
-def heikin_ashi_close(df):
-    return (df["open"] + df["high"] + df["low"] + df["close"]) / 4
-
 def calc_atr(df, period):
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
@@ -83,222 +92,259 @@ def calc_atr(df, period):
         (high - prev_close).abs(),
         (low  - prev_close).abs()
     ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/period, adjust=False).mean()
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
 
-def calc_atr_trailing_stop(src, atr, key):
-    n_loss = key * atr
-    ts     = np.zeros(len(src))
-    for i in range(1, len(src)):
-        prev = ts[i - 1]
-        s    = src.iloc[i]
-        sp   = src.iloc[i - 1]
-        if s > prev and sp > prev:
-            ts[i] = max(prev, s - n_loss.iloc[i])
-        elif s < prev and sp < prev:
-            ts[i] = min(prev, s + n_loss.iloc[i])
-        elif s > prev:
-            ts[i] = s - n_loss.iloc[i]
-        else:
-            ts[i] = s + n_loss.iloc[i]
-    return pd.Series(ts, index=src.index)
 
-def calc_rsi(src, period):
-    delta = src.diff()
-    gain  = delta.clip(lower=0)
-    loss  = (-delta).clip(lower=0)
-    ag    = gain.ewm(alpha=1/period, adjust=False).mean()
-    al    = loss.ewm(alpha=1/period, adjust=False).mean()
-    rs    = ag / al
-    return 100 - (100 / (1 + rs))
+def calc_adx(df, period):
+    """Wilder's ADX — matches Pine Script ta.dmi() output."""
+    high, low, close = df["high"], df["low"], df["close"]
+
+    # True Range
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    # Directional Movement
+    up_move   = high.diff()
+    down_move = -low.diff()
+
+    plus_dm  = np.where((up_move > down_move)   & (up_move > 0),   up_move,   0.0)
+    minus_dm = np.where((down_move > up_move)   & (down_move > 0), down_move, 0.0)
+    plus_dm  = pd.Series(plus_dm,  index=df.index)
+    minus_dm = pd.Series(minus_dm, index=df.index)
+
+    # Wilder smoothing
+    atr_w    = tr.ewm(alpha=1 / period, adjust=False).mean()
+    plus_di  = 100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_w
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr_w
+
+    # DX → ADX
+    denom = (plus_di + minus_di).replace(0, np.nan)
+    dx    = 100 * (plus_di - minus_di).abs() / denom
+    adx   = dx.ewm(alpha=1 / period, adjust=False).mean()
+    return adx
+
 
 def build_signals(df):
-    src = heikin_ashi_close(df) if USE_HA else df["close"].copy()
-    atr = calc_atr(df, ATR_PERIOD)
-    ts  = calc_atr_trailing_stop(src, atr, KEY_VALUE)
-    rsi = calc_rsi(src, RSI_PERIOD)
+    close = df["close"]
 
-    above = (src.shift(1) < ts.shift(1)) & (src >= ts)
-    below = (ts.shift(1) < src.shift(1)) & (ts >= src)
+    fast_ema  = close.ewm(span=FAST_EMA,      adjust=False).mean()
+    slow_ema  = close.ewm(span=SLOW_EMA,      adjust=False).mean()
+    trend_ema = close.ewm(span=TREND_EMA_LEN, adjust=False).mean()
+    atr       = calc_atr(df, ATR_LEN)
+    adx       = calc_adx(df, ADX_LEN)
 
-    raw_buy  = (src > ts) & above
-    raw_sell = (src < ts) & below
+    # EMA crossovers (match Pine Script ta.crossover / ta.crossunder)
+    cross_bull = (fast_ema > slow_ema) & (fast_ema.shift(1) <= slow_ema.shift(1))
+    cross_bear = (fast_ema < slow_ema) & (fast_ema.shift(1) >= slow_ema.shift(1))
 
-    qual_buy  = raw_buy  & (rsi >= RSI_BUY_LO)  & (rsi <= RSI_BUY_HI)
-    qual_sell = raw_sell & (rsi >= RSI_SELL_LO) & (rsi <= RSI_SELL_HI)
+    # Trend filter
+    htf_buy_ok  = (~USE_TREND_FILTER) | (close > trend_ema)
+    htf_sell_ok = (~USE_TREND_FILTER) | (close < trend_ema)
+
+    # ADX filter
+    is_choppy = USE_ADX & (adx < ADX_THRESHOLD)
+
+    # Swing SL levels (match Pine Script ta.lowest / ta.highest)
+    swing_low  = df["low"].rolling(SL_LOOKBACK).min()
+    swing_high = df["high"].rolling(SL_LOOKBACK).max()
+    buy_sl     = swing_low  - atr * ATR_BUFFER
+    sell_sl    = swing_high + atr * ATR_BUFFER
+
+    # Valid signals
+    valid_buy  = cross_bull & htf_buy_ok  & ~is_choppy
+    valid_sell = cross_bear & htf_sell_ok & ~is_choppy
 
     df = df.copy()
-    df["src"]       = src
-    df["ts"]        = ts
-    df["rsi"]       = rsi
-    df["raw_buy"]   = raw_buy
-    df["raw_sell"]  = raw_sell
-    df["qual_buy"]  = qual_buy
-    df["qual_sell"] = qual_sell
+    df["fast_ema"]  = fast_ema
+    df["slow_ema"]  = slow_ema
+    df["trend_ema"] = trend_ema
+    df["atr"]       = atr
+    df["adx"]       = adx
+    df["buy_sl"]    = buy_sl
+    df["sell_sl"]   = sell_sl
+    df["valid_buy"] = valid_buy
+    df["valid_sell"]= valid_sell
     return df
+
+# ══════════════════════════════════════════════════════════════
+# LOT SIZE & PnL
+# ══════════════════════════════════════════════════════════════
+
+def calc_lot(entry, sl):
+    sl_dist   = abs(entry - sl)
+    sl_in_pips = sl_dist / PIP_SIZE
+    if sl_in_pips <= 0:
+        return 0.01
+    return max(0.01, round(RISK_USD / (sl_in_pips * PIP_VALUE_PER_LOT), 2))
+
+
+def calc_pnl(entry, exit_price, lots, is_buy):
+    price_diff = (exit_price - entry) if is_buy else (entry - exit_price)
+    pips       = price_diff / PIP_SIZE
+    return round(pips * PIP_VALUE_PER_LOT * lots, 2)
 
 # ══════════════════════════════════════════════════════════════
 # BACKTEST ENGINE
 # ══════════════════════════════════════════════════════════════
 
-def calc_lot(entry, sl):
-    dist = abs(entry - sl)
-    if dist == 0:
-        return 0.01
-    return max(0.01, round(RISK_USD / (dist * 100), 2))
-
 def run_backtest(df):
-    trades      = []
+    trades       = []
     equity_curve = []
 
-    balance      = ACCOUNT_SIZE
-    trade_dir    = 0        #  1=long | -1=short | 0=flat
-    entry_price  = None
-    sl_price     = None
-    entry_time   = None
-    lot_size     = None
-    entry_rsi    = None
-    trade_id     = 0
+    balance    = ACCOUNT_SIZE
+    trade_dir  = 0          # 1=long | -1=short | 0=flat
+    entry_price = None
+    sl_price    = None
+    entry_time  = None
+    lot_size    = None
+    entry_adx   = None
+    trade_id    = 0
 
-    # Start from bar 50 so ATR/RSI have enough warmup
-    for i in range(50, len(df)):
-        row     = df.iloc[i]
-        time_i  = row["time"]
-        close_i = row["src"]
-        ts_i    = row["ts"]
-        rsi_i   = row["rsi"]
+    # Warmup: need enough bars for TREND_EMA + ADX to settle
+    warmup = max(TREND_EMA_LEN, SL_LOOKBACK) + 10
+
+    for i in range(warmup, len(df)):
+        row    = df.iloc[i]
+        time_i = row["time"]
+        close_i = row["close"]
         high_i  = row["high"]
         low_i   = row["low"]
+        atr_i   = row["atr"]
+        buy_sl_i  = row["buy_sl"]
+        sell_sl_i = row["sell_sl"]
 
-        # ── Check SL hit on current bar (before signal) ───────
+        # ── Check SL / Trail hit (before signal) ─────────────
         sl_hit = False
+
         if trade_dir == 1 and sl_price is not None:
             if low_i <= sl_price:
-                sl_hit     = True
-                exit_price = sl_price
-                pnl        = round((exit_price - entry_price) * lot_size * 100, 2)
-                balance   += pnl
-                trade_id  += 1
-                trailing   = sl_price > entry_price   # SL was above entry = locked profit
+                sl_hit      = True
+                exit_price  = sl_price
+                pnl         = calc_pnl(entry_price, exit_price, lot_size, True)
+                balance    += pnl
+                trade_id   += 1
+                trailing    = sl_price > entry_price
                 trades.append({
-                    "id"         : trade_id,
-                    "direction"  : "BUY",
-                    "entry_time" : entry_time,
-                    "exit_time"  : time_i,
-                    "entry_price": round(entry_price, 2),
-                    "exit_price" : round(exit_price, 2),
-                    "sl_price"   : round(sl_price, 2),
-                    "lot_size"   : lot_size,
-                    "rsi_entry"  : round(entry_rsi, 1),
-                    "pnl"        : pnl,
+                    "id"          : trade_id,
+                    "direction"   : "BUY",
+                    "entry_time"  : entry_time,
+                    "exit_time"   : time_i,
+                    "entry_price" : round(entry_price, 5),
+                    "exit_price"  : round(exit_price,  5),
+                    "sl_price"    : round(sl_price,    5),
+                    "lot_size"    : lot_size,
+                    "adx_entry"   : round(entry_adx,   1),
+                    "pnl"         : pnl,
                     "close_reason": "TRAIL HIT" if trailing else "SL HIT",
-                    "balance"    : round(balance, 2),
+                    "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
-                entry_price = sl_price = lot_size = entry_time = entry_rsi = None
+                entry_price = sl_price = lot_size = entry_time = entry_adx = None
 
         if trade_dir == -1 and sl_price is not None:
             if high_i >= sl_price:
-                sl_hit     = True
-                exit_price = sl_price
-                pnl        = round((entry_price - exit_price) * lot_size * 100, 2)
-                balance   += pnl
-                trade_id  += 1
-                trailing   = sl_price < entry_price   # SL was below entry = locked profit
+                sl_hit      = True
+                exit_price  = sl_price
+                pnl         = calc_pnl(entry_price, exit_price, lot_size, False)
+                balance    += pnl
+                trade_id   += 1
+                trailing    = sl_price < entry_price
                 trades.append({
-                    "id"         : trade_id,
-                    "direction"  : "SELL",
-                    "entry_time" : entry_time,
-                    "exit_time"  : time_i,
-                    "entry_price": round(entry_price, 2),
-                    "exit_price" : round(exit_price, 2),
-                    "sl_price"   : round(sl_price, 2),
-                    "lot_size"   : lot_size,
-                    "rsi_entry"  : round(entry_rsi, 1),
-                    "pnl"        : pnl,
+                    "id"          : trade_id,
+                    "direction"   : "SELL",
+                    "entry_time"  : entry_time,
+                    "exit_time"   : time_i,
+                    "entry_price" : round(entry_price, 5),
+                    "exit_price"  : round(exit_price,  5),
+                    "sl_price"    : round(sl_price,    5),
+                    "lot_size"    : lot_size,
+                    "adx_entry"   : round(entry_adx,   1),
+                    "pnl"         : pnl,
                     "close_reason": "TRAIL HIT" if trailing else "SL HIT",
-                    "balance"    : round(balance, 2),
+                    "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
-                entry_price = sl_price = lot_size = entry_time = entry_rsi = None
+                entry_price = sl_price = lot_size = entry_time = entry_adx = None
 
-        # ── ATR Trailing SL: ratchet SL in profit direction each bar ──
-        # For BUY  : only move SL up   (lock in gains, never widen)
-        # For SELL : only move SL down (lock in gains, never widen)
+        # ── ATR Trailing SL: ratchet in profit direction ──────
+        # Uses rolling swing SL (same formula as entry SL, updated each bar)
         if not sl_hit and trade_dir == 1 and sl_price is not None:
-            sl_price = max(sl_price, ts_i)
+            sl_price = max(sl_price, buy_sl_i)
         if not sl_hit and trade_dir == -1 and sl_price is not None:
-            sl_price = min(sl_price, ts_i)
+            sl_price = min(sl_price, sell_sl_i)
 
-        # ── Signal logic (only on completed bar, no same-side) ─
+        # ── Signal logic ──────────────────────────────────────
         if not sl_hit:
+
             # BUY trigger
-            if row["qual_buy"] and trade_dir != 1:
+            if row["valid_buy"] and trade_dir != 1:
                 # Close short by reversal
                 if trade_dir == -1 and entry_price is not None:
-                    exit_price = close_i
-                    pnl        = round((entry_price - exit_price) * lot_size * 100, 2)
-                    balance   += pnl
-                    trade_id  += 1
+                    pnl     = calc_pnl(entry_price, close_i, lot_size, False)
+                    balance += pnl
+                    trade_id += 1
                     trades.append({
-                        "id"         : trade_id,
-                        "direction"  : "SELL",
-                        "entry_time" : entry_time,
-                        "exit_time"  : time_i,
-                        "entry_price": round(entry_price, 2),
-                        "exit_price" : round(exit_price, 2),
-                        "sl_price"   : round(sl_price, 2),
-                        "lot_size"   : lot_size,
-                        "rsi_entry"  : round(entry_rsi, 1),
-                        "pnl"        : pnl,
+                        "id"          : trade_id,
+                        "direction"   : "SELL",
+                        "entry_time"  : entry_time,
+                        "exit_time"   : time_i,
+                        "entry_price" : round(entry_price, 5),
+                        "exit_price"  : round(close_i,     5),
+                        "sl_price"    : round(sl_price,    5),
+                        "lot_size"    : lot_size,
+                        "adx_entry"   : round(entry_adx,   1),
+                        "pnl"         : pnl,
                         "close_reason": "REVERSAL",
-                        "balance"    : round(balance, 2),
+                        "balance"     : round(balance, 2),
                     })
 
                 # Open long
                 entry_price = close_i
-                sl_price    = ts_i
+                sl_price    = buy_sl_i
                 lot_size    = calc_lot(entry_price, sl_price)
                 entry_time  = time_i
-                entry_rsi   = rsi_i
+                entry_adx   = row["adx"]
                 trade_dir   = 1
 
             # SELL trigger
-            elif row["qual_sell"] and trade_dir != -1:
+            elif row["valid_sell"] and trade_dir != -1:
                 # Close long by reversal
                 if trade_dir == 1 and entry_price is not None:
-                    exit_price = close_i
-                    pnl        = round((exit_price - entry_price) * lot_size * 100, 2)
-                    balance   += pnl
-                    trade_id  += 1
+                    pnl     = calc_pnl(entry_price, close_i, lot_size, True)
+                    balance += pnl
+                    trade_id += 1
                     trades.append({
-                        "id"         : trade_id,
-                        "direction"  : "BUY",
-                        "entry_time" : entry_time,
-                        "exit_time"  : time_i,
-                        "entry_price": round(entry_price, 2),
-                        "exit_price" : round(exit_price, 2),
-                        "sl_price"   : round(sl_price, 2),
-                        "lot_size"   : lot_size,
-                        "rsi_entry"  : round(entry_rsi, 1),
-                        "pnl"        : pnl,
+                        "id"          : trade_id,
+                        "direction"   : "BUY",
+                        "entry_time"  : entry_time,
+                        "exit_time"   : time_i,
+                        "entry_price" : round(entry_price, 5),
+                        "exit_price"  : round(close_i,     5),
+                        "sl_price"    : round(sl_price,    5),
+                        "lot_size"    : lot_size,
+                        "adx_entry"   : round(entry_adx,   1),
+                        "pnl"         : pnl,
                         "close_reason": "REVERSAL",
-                        "balance"    : round(balance, 2),
+                        "balance"     : round(balance, 2),
                     })
 
                 # Open short
                 entry_price = close_i
-                sl_price    = ts_i
+                sl_price    = sell_sl_i
                 lot_size    = calc_lot(entry_price, sl_price)
                 entry_time  = time_i
-                entry_rsi   = rsi_i
+                entry_adx   = row["adx"]
                 trade_dir   = -1
 
-        # ── Equity snapshot ────────────────────────────────────
-        # Mark-to-market open position
+        # ── Equity snapshot ───────────────────────────────────
         if trade_dir == 1 and entry_price:
-            unreal = round((close_i - entry_price) * lot_size * 100, 2)
+            unreal = calc_pnl(entry_price, close_i, lot_size, True)
         elif trade_dir == -1 and entry_price:
-            unreal = round((entry_price - close_i) * lot_size * 100, 2)
+            unreal = calc_pnl(entry_price, close_i, lot_size, False)
         else:
             unreal = 0
 
@@ -318,9 +364,9 @@ def compute_stats(trades_df, equity_df):
     if trades_df.empty:
         return {}
 
-    t        = trades_df
-    wins     = t[t["pnl"] > 0]
-    losses   = t[t["pnl"] <= 0]
+    t    = trades_df
+    wins = t[t["pnl"] > 0]
+    losses = t[t["pnl"] <= 0]
     sl_trades    = t[t["close_reason"] == "SL HIT"]
     trail_trades = t[t["close_reason"] == "TRAIL HIT"]
     rev_trades   = t[t["close_reason"] == "REVERSAL"]
@@ -330,16 +376,17 @@ def compute_stats(trades_df, equity_df):
     peak         = equity_df["equity"].cummax()
     drawdown     = (equity_df["equity"] - peak) / peak * 100
     max_dd       = round(drawdown.min(), 2)
-    avg_win      = round(wins["pnl"].mean(), 2)  if not wins.empty   else 0
+    avg_win      = round(wins["pnl"].mean(),   2) if not wins.empty   else 0
     avg_loss     = round(losses["pnl"].mean(), 2) if not losses.empty else 0
-    profit_factor = round(wins["pnl"].sum() / abs(losses["pnl"].sum()), 2) if not losses.empty and losses["pnl"].sum() != 0 else float("inf")
+    pf_denom     = abs(losses["pnl"].sum())
+    profit_factor = round(wins["pnl"].sum() / pf_denom, 2) if pf_denom > 0 else float("inf")
 
-    # Sharpe (annualised, assuming M15 bars ~26,000/year)
-    daily_eq = equity_df.set_index("time")["equity"].resample("D").last().dropna()
+    # Sharpe (annualised)
+    daily_eq  = equity_df.set_index("time")["equity"].resample("D").last().dropna()
     daily_ret = daily_eq.pct_change().dropna()
-    sharpe = round((daily_ret.mean() / daily_ret.std()) * np.sqrt(252), 2) if daily_ret.std() > 0 else 0
+    sharpe    = round((daily_ret.mean() / daily_ret.std()) * np.sqrt(252), 2) if daily_ret.std() > 0 else 0
 
-    # Consecutive wins/losses
+    # Consecutive streaks
     streak = t["pnl"].apply(lambda x: 1 if x > 0 else -1)
     max_win_streak = max_loss_streak = cur = 0
     for s in streak:
@@ -351,25 +398,25 @@ def compute_stats(trades_df, equity_df):
         max_loss_streak = max(max_loss_streak, cur)
 
     return {
-        "total_trades"     : len(t),
-        "wins"             : len(wins),
-        "losses"           : len(losses),
-        "win_rate"         : round(len(wins) / len(t) * 100, 1),
-        "total_pnl"        : round(total_pnl, 2),
-        "final_balance"    : round(final_bal, 2),
-        "return_pct"       : round(total_pnl / ACCOUNT_SIZE * 100, 2),
-        "max_drawdown_pct" : max_dd,
-        "avg_win"          : avg_win,
-        "avg_loss"         : avg_loss,
-        "profit_factor"    : profit_factor,
-        "sharpe"           : sharpe,
-        "sl_hits"          : len(sl_trades),
-        "trail_hits"       : len(trail_trades),
-        "reversals"        : len(rev_trades),
-        "max_win_streak"   : max_win_streak,
-        "max_loss_streak"  : max_loss_streak,
-        "best_trade"       : round(t["pnl"].max(), 2),
-        "worst_trade"      : round(t["pnl"].min(), 2),
+        "total_trades"    : len(t),
+        "wins"            : len(wins),
+        "losses"          : len(losses),
+        "win_rate"        : round(len(wins) / len(t) * 100, 1),
+        "total_pnl"       : round(total_pnl, 2),
+        "final_balance"   : round(final_bal, 2),
+        "return_pct"      : round(total_pnl / ACCOUNT_SIZE * 100, 2),
+        "max_drawdown_pct": max_dd,
+        "avg_win"         : avg_win,
+        "avg_loss"        : avg_loss,
+        "profit_factor"   : profit_factor,
+        "sharpe"          : sharpe,
+        "sl_hits"         : len(sl_trades),
+        "trail_hits"      : len(trail_trades),
+        "reversals"       : len(rev_trades),
+        "max_win_streak"  : max_win_streak,
+        "max_loss_streak" : max_loss_streak,
+        "best_trade"      : round(t["pnl"].max(), 2),
+        "worst_trade"     : round(t["pnl"].min(), 2),
     }
 
 # ══════════════════════════════════════════════════════════════
@@ -381,21 +428,21 @@ def build_html(stats, trades_df, equity_df):
     eq_bal    = equity_df["balance"].tolist()
     eq_equity = equity_df["equity"].tolist()
 
-    # Monthly PnL bar chart
+    # Monthly PnL
     if not trades_df.empty:
         trades_df["month"] = pd.to_datetime(trades_df["exit_time"]).dt.to_period("M")
-        monthly = trades_df.groupby("month")["pnl"].sum().reset_index()
+        monthly   = trades_df.groupby("month")["pnl"].sum().reset_index()
         monthly["month"] = monthly["month"].astype(str)
-        m_labels = monthly["month"].tolist()
-        m_values = monthly["pnl"].tolist()
-        m_colors = ["'#00d4a0'" if v >= 0 else "'#ff4d6d'" for v in m_values]
+        m_labels  = monthly["month"].tolist()
+        m_values  = monthly["pnl"].tolist()
+        m_colors  = ["'#00c9ff'" if v >= 0 else "'#ff4d6d'" for v in m_values]
     else:
         m_labels, m_values, m_colors = [], [], []
 
     # Trade log rows
     rows = ""
     for _, r in trades_df.iterrows():
-        pnl_cls = "win" if r["pnl"] > 0 else "loss"
+        pnl_cls     = "win" if r["pnl"] > 0 else "loss"
         reason_icon = "🔄" if r["close_reason"] == "REVERSAL" else ("📈" if r["close_reason"] == "TRAIL HIT" else "🛑")
         rows += f"""
         <tr class="{pnl_cls}">
@@ -407,304 +454,157 @@ def build_html(stats, trades_df, equity_df):
           <td>{r['exit_price']}</td>
           <td>{r['sl_price']}</td>
           <td>{r['lot_size']}</td>
-          <td>{r['rsi_entry']}</td>
+          <td>{r['adx_entry']}</td>
           <td class="pnl-{'pos' if r['pnl']>0 else 'neg'}">${r['pnl']:,.2f}</td>
           <td>{reason_icon} {r['close_reason']}</td>
           <td>${r['balance']:,.2f}</td>
         </tr>"""
 
-    s = stats
-    ret_color  = "#00d4a0" if s.get("return_pct", 0) >= 0 else "#ff4d6d"
-    pnl_color  = "#00d4a0" if s.get("total_pnl",  0) >= 0 else "#ff4d6d"
+    s         = stats
+    ret_color = "#00c9ff" if s.get("return_pct", 0) >= 0 else "#ff4d6d"
+    pnl_color = "#00c9ff" if s.get("total_pnl",  0) >= 0 else "#ff4d6d"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>UT Bot Gold Backtest Report</title>
+<title>EMA Cross Backtest — {SYMBOL}</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {{
-    --bg:       #09090f;
-    --surface:  #111118;
-    --card:     #16161f;
-    --border:   #222230;
-    --gold:     #f5c518;
-    --gold2:    #e8a800;
-    --green:    #00d4a0;
-    --red:      #ff4d6d;
-    --blue:     #4d9fff;
-    --text:     #e8e8f0;
-    --muted:    #666680;
-    --font:     'Syne', sans-serif;
-    --mono:     'JetBrains Mono', monospace;
+    --bg:      #09090f;
+    --surface: #111118;
+    --card:    #16161f;
+    --border:  #222230;
+    --accent:  #00c9ff;
+    --accent2: #0077ff;
+    --green:   #00d4a0;
+    --red:     #ff4d6d;
+    --blue:    #4d9fff;
+    --text:    #e8e8f0;
+    --muted:   #666680;
+    --font:    'Syne', sans-serif;
+    --mono:    'JetBrains Mono', monospace;
   }}
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font);
-    min-height: 100vh;
-  }}
+  body {{ background:var(--bg); color:var(--text); font-family:var(--font); min-height:100vh; }}
 
-  /* ── HEADER ── */
   header {{
-    background: linear-gradient(135deg, #0d0d16 0%, #12101a 50%, #0a0d14 100%);
+    background: linear-gradient(135deg, #0a0d18 0%, #0d1020 50%, #080b14 100%);
     border-bottom: 1px solid var(--border);
     padding: 40px 48px 32px;
-    position: relative;
-    overflow: hidden;
+    position: relative; overflow: hidden;
   }}
   header::before {{
-    content: '';
-    position: absolute;
-    top: -60px; left: -60px;
-    width: 320px; height: 320px;
-    background: radial-gradient(circle, rgba(245,197,24,0.07) 0%, transparent 70%);
-    pointer-events: none;
+    content:''; position:absolute; top:-60px; left:-60px;
+    width:320px; height:320px;
+    background:radial-gradient(circle, rgba(0,201,255,0.07) 0%, transparent 70%);
+    pointer-events:none;
   }}
   header::after {{
-    content: 'XAUUSD';
-    position: absolute;
-    right: 48px; top: 50%;
-    transform: translateY(-50%);
-    font-size: 96px;
-    font-weight: 800;
-    color: rgba(245,197,24,0.04);
-    letter-spacing: -4px;
-    pointer-events: none;
+    content:'{SYMBOL}'; position:absolute; right:48px; top:50%;
+    transform:translateY(-50%); font-size:96px; font-weight:800;
+    color:rgba(0,201,255,0.04); letter-spacing:-4px; pointer-events:none;
   }}
   .header-badge {{
-    display: inline-block;
-    background: rgba(245,197,24,0.12);
-    border: 1px solid rgba(245,197,24,0.3);
-    color: var(--gold);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 2px;
-    padding: 4px 12px;
-    border-radius: 2px;
-    margin-bottom: 16px;
-    font-family: var(--mono);
+    display:inline-block; background:rgba(0,201,255,0.12);
+    border:1px solid rgba(0,201,255,0.3); color:var(--accent);
+    font-size:11px; font-weight:600; letter-spacing:2px;
+    padding:4px 12px; border-radius:2px; margin-bottom:16px; font-family:var(--mono);
   }}
-  header h1 {{
-    font-size: 36px;
-    font-weight: 800;
-    letter-spacing: -1px;
-    color: var(--text);
-    margin-bottom: 8px;
-  }}
-  header h1 span {{ color: var(--gold); }}
+  header h1 {{ font-size:36px; font-weight:800; letter-spacing:-1px; color:var(--text); margin-bottom:8px; }}
+  header h1 span {{ color:var(--accent); }}
   .header-meta {{
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--muted);
-    display: flex;
-    gap: 24px;
-    flex-wrap: wrap;
-    margin-top: 12px;
+    font-family:var(--mono); font-size:12px; color:var(--muted);
+    display:flex; gap:24px; flex-wrap:wrap; margin-top:12px;
   }}
-  .header-meta span {{ display: flex; align-items: center; gap: 6px; }}
-  .dot {{ width:6px; height:6px; border-radius:50%; background: var(--green); display:inline-block; }}
+  .header-meta span {{ display:flex; align-items:center; gap:6px; }}
+  .dot {{ width:6px; height:6px; border-radius:50%; background:var(--green); display:inline-block; }}
 
-  /* ── LAYOUT ── */
-  main {{ padding: 40px 48px; max-width: 1600px; }}
+  main {{ padding:40px 48px; max-width:1600px; }}
 
-  /* ── KPI GRID ── */
   .kpi-grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 16px;
-    margin-bottom: 40px;
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr));
+    gap:16px; margin-bottom:40px;
   }}
   .kpi {{
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px 22px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.2s;
+    background:var(--card); border:1px solid var(--border); border-radius:8px;
+    padding:20px 22px; position:relative; overflow:hidden; transition:border-color 0.2s;
   }}
-  .kpi:hover {{ border-color: rgba(245,197,24,0.3); }}
+  .kpi:hover {{ border-color:rgba(0,201,255,0.3); }}
   .kpi::before {{
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent, var(--gold));
+    content:''; position:absolute; top:0; left:0; right:0; height:2px;
+    background:var(--kpi-accent, var(--accent));
   }}
-  .kpi-label {{
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    color: var(--muted);
-    text-transform: uppercase;
-    font-family: var(--mono);
-    margin-bottom: 10px;
-  }}
-  .kpi-value {{
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--text);
-    line-height: 1;
-  }}
-  .kpi-sub {{
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 6px;
-    font-family: var(--mono);
-  }}
+  .kpi-label {{ font-size:10px; font-weight:600; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; font-family:var(--mono); margin-bottom:10px; }}
+  .kpi-value {{ font-size:26px; font-weight:700; color:var(--text); line-height:1; }}
+  .kpi-sub   {{ font-size:11px; color:var(--muted); margin-top:6px; font-family:var(--mono); }}
 
-  /* ── CHARTS ── */
-  .charts-row {{
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 20px;
-    margin-bottom: 28px;
-  }}
-  .chart-card {{
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 24px;
-  }}
-  .chart-title {{
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 20px;
-    font-family: var(--mono);
-  }}
-  canvas {{ width: 100% !important; }}
+  .charts-row {{ display:grid; grid-template-columns:2fr 1fr; gap:20px; margin-bottom:28px; }}
+  .chart-card {{ background:var(--card); border:1px solid var(--border); border-radius:8px; padding:24px; }}
+  .chart-title {{ font-size:13px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--muted); margin-bottom:20px; font-family:var(--mono); }}
+  canvas {{ width:100% !important; }}
 
-  /* ── TRADE TABLE ── */
   .section-title {{
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    font-size:18px; font-weight:700; color:var(--text); margin-bottom:16px;
+    padding-bottom:12px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:10px;
   }}
   .section-title::before {{
-    content: '';
-    display: block;
-    width: 3px; height: 18px;
-    background: var(--gold);
-    border-radius: 2px;
+    content:''; display:block; width:3px; height:18px;
+    background:var(--accent); border-radius:2px;
   }}
-  .table-wrap {{
-    overflow-x: auto;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-  }}
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    font-family: var(--mono);
-  }}
-  thead tr {{
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-  }}
-  th {{
-    padding: 12px 14px;
-    text-align: left;
-    font-size: 10px;
-    letter-spacing: 1px;
-    color: var(--muted);
-    font-weight: 600;
-    white-space: nowrap;
-  }}
-  td {{ padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.03); white-space: nowrap; }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr.win {{ background: rgba(0,212,160,0.02); }}
-  tr.loss {{ background: rgba(255,77,109,0.02); }}
-  tr:hover td {{ background: rgba(255,255,255,0.02); }}
-  .dir-buy  {{ color: var(--green); font-weight: 600; }}
-  .dir-sell {{ color: var(--red);   font-weight: 600; }}
-  .pnl-pos  {{ color: var(--green); font-weight: 600; }}
-  .pnl-neg  {{ color: var(--red);   font-weight: 600; }}
+  .table-wrap {{ overflow-x:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:12px; font-family:var(--mono); }}
+  thead tr {{ background:var(--surface); border-bottom:1px solid var(--border); }}
+  th {{ padding:12px 14px; text-align:left; font-size:10px; letter-spacing:1px; color:var(--muted); font-weight:600; white-space:nowrap; }}
+  td {{ padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.03); white-space:nowrap; }}
+  tr:last-child td {{ border-bottom:none; }}
+  tr.win  {{ background:rgba(0,212,160,0.02); }}
+  tr.loss {{ background:rgba(255,77,109,0.02); }}
+  tr:hover td {{ background:rgba(255,255,255,0.02); }}
+  .dir-buy  {{ color:var(--green); font-weight:600; }}
+  .dir-sell {{ color:var(--red);   font-weight:600; }}
+  .pnl-pos  {{ color:var(--green); font-weight:600; }}
+  .pnl-neg  {{ color:var(--red);   font-weight:600; }}
 
-  /* ── STATS ROW ── */
-  .stats-row {{
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 20px;
-    margin-bottom: 28px;
-  }}
-  .stat-block {{
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px 24px;
-  }}
-  .stat-block h3 {{
-    font-size: 11px;
-    letter-spacing: 1.5px;
-    color: var(--muted);
-    text-transform: uppercase;
-    font-family: var(--mono);
-    margin-bottom: 14px;
-  }}
-  .stat-row {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 7px 0;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-    font-size: 12px;
-  }}
-  .stat-row:last-child {{ border-bottom: none; }}
-  .stat-row .label {{ color: var(--muted); font-family: var(--mono); }}
-  .stat-row .val   {{ font-weight: 600; font-family: var(--mono); }}
+  .stats-row {{ display:grid; grid-template-columns:repeat(3,1fr); gap:20px; margin-bottom:28px; }}
+  .stat-block {{ background:var(--card); border:1px solid var(--border); border-radius:8px; padding:20px 24px; }}
+  .stat-block h3 {{ font-size:11px; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; font-family:var(--mono); margin-bottom:14px; }}
+  .stat-row {{ display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:12px; }}
+  .stat-row:last-child {{ border-bottom:none; }}
+  .stat-row .label {{ color:var(--muted); font-family:var(--mono); }}
+  .stat-row .val   {{ font-weight:600; font-family:var(--mono); }}
 
-  footer {{
-    text-align: center;
-    padding: 32px;
-    color: var(--muted);
-    font-size: 11px;
-    font-family: var(--mono);
-    border-top: 1px solid var(--border);
-    margin-top: 40px;
-  }}
+  footer {{ text-align:center; padding:32px; color:var(--muted); font-size:11px; font-family:var(--mono); border-top:1px solid var(--border); margin-top:40px; }}
 </style>
 </head>
 <body>
 
 <header>
   <div class="header-badge">BACKTEST REPORT</div>
-  <h1>UT Bot <span>Gold</span> Strategy</h1>
+  <h1>EMA Cross <span>{SYMBOL}</span> Strategy</h1>
   <div class="header-meta">
-    <span><span class="dot"></span> XAUUSD · M15</span>
+    <span><span class="dot"></span> {SYMBOL} · M15</span>
     <span>Period: Last 2 Years</span>
     <span>Account: $100,000</span>
     <span>Risk/Trade: $100</span>
-    <span>Key: {KEY_VALUE} · ATR: {ATR_PERIOD} · RSI {RSI_BUY_LO}-{RSI_BUY_HI}/{RSI_SELL_LO}-{RSI_SELL_HI}</span>
+    <span>EMA {FAST_EMA}/{SLOW_EMA}/{TREND_EMA_LEN} · ADX {ADX_LEN}&lt;{ADX_THRESHOLD} · SL Lookback {SL_LOOKBACK} · ATR Buffer {ATR_BUFFER}</span>
     <span>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</span>
   </div>
 </header>
 
 <main>
 
-<!-- KPI CARDS -->
 <div class="kpi-grid">
-  <div class="kpi" style="--accent:{ret_color}">
+  <div class="kpi" style="--kpi-accent:{ret_color}">
     <div class="kpi-label">Total Return</div>
     <div class="kpi-value" style="color:{ret_color}">{s.get('return_pct',0):+.2f}%</div>
     <div class="kpi-sub">on $100,000 account</div>
   </div>
-  <div class="kpi" style="--accent:{pnl_color}">
+  <div class="kpi" style="--kpi-accent:{pnl_color}">
     <div class="kpi-label">Net P&L</div>
     <div class="kpi-value" style="color:{pnl_color}">${s.get('total_pnl',0):+,.2f}</div>
     <div class="kpi-sub">final: ${s.get('final_balance',0):,.2f}</div>
@@ -714,17 +614,17 @@ def build_html(stats, trades_df, equity_df):
     <div class="kpi-value">{s.get('win_rate',0)}%</div>
     <div class="kpi-sub">{s.get('wins',0)}W / {s.get('losses',0)}L of {s.get('total_trades',0)}</div>
   </div>
-  <div class="kpi" style="--accent:var(--red)">
+  <div class="kpi" style="--kpi-accent:var(--red)">
     <div class="kpi-label">Max Drawdown</div>
     <div class="kpi-value" style="color:var(--red)">{s.get('max_drawdown_pct',0):.2f}%</div>
     <div class="kpi-sub">peak-to-trough equity</div>
   </div>
-  <div class="kpi" style="--accent:var(--blue)">
+  <div class="kpi" style="--kpi-accent:var(--blue)">
     <div class="kpi-label">Profit Factor</div>
     <div class="kpi-value">{s.get('profit_factor',0)}</div>
     <div class="kpi-sub">gross profit / gross loss</div>
   </div>
-  <div class="kpi" style="--accent:var(--blue)">
+  <div class="kpi" style="--kpi-accent:var(--blue)">
     <div class="kpi-label">Sharpe Ratio</div>
     <div class="kpi-value">{s.get('sharpe',0)}</div>
     <div class="kpi-sub">annualised daily returns</div>
@@ -741,7 +641,6 @@ def build_html(stats, trades_df, equity_df):
   </div>
 </div>
 
-<!-- EQUITY CURVE + MONTHLY BAR -->
 <div class="charts-row">
   <div class="chart-card">
     <div class="chart-title">Equity Curve</div>
@@ -753,7 +652,6 @@ def build_html(stats, trades_df, equity_df):
   </div>
 </div>
 
-<!-- DETAILED STATS -->
 <div class="stats-row">
   <div class="stat-block">
     <h3>Performance</h3>
@@ -785,15 +683,14 @@ def build_html(stats, trades_df, equity_df):
   </div>
 </div>
 
-<!-- TRADE LOG -->
 <div class="section-title">Trade Log — {s.get('total_trades',0)} Trades</div>
 <div class="table-wrap">
   <table>
     <thead>
       <tr>
         <th>#</th><th>DIR</th><th>ENTRY TIME</th><th>EXIT TIME</th>
-        <th>ENTRY $</th><th>EXIT $</th><th>SL $</th><th>LOTS</th>
-        <th>RSI</th><th>P&L</th><th>REASON</th><th>BALANCE</th>
+        <th>ENTRY</th><th>EXIT</th><th>SL</th><th>LOTS</th>
+        <th>ADX</th><th>P&L</th><th>REASON</th><th>BALANCE</th>
       </tr>
     </thead>
     <tbody>{rows}</tbody>
@@ -803,11 +700,10 @@ def build_html(stats, trades_df, equity_df):
 </main>
 
 <footer>
-  UT Bot Gold Backtest · XAUUSD M15 · Key={KEY_VALUE} ATR={ATR_PERIOD} · RSI {RSI_BUY_LO}-{RSI_BUY_HI}/{RSI_SELL_LO}-{RSI_SELL_HI} · $100 risk/trade · Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}
+  EMA Cross Backtest · {SYMBOL} M15 · EMA {FAST_EMA}/{SLOW_EMA}/{TREND_EMA_LEN} · ADX {ADX_LEN}&lt;{ADX_THRESHOLD} · $100 risk/trade · Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}
 </footer>
 
 <script>
-// ── Equity Curve ────────────────────────────────────────────
 const eqLabels  = {json.dumps(eq_times[::4])};
 const eqBalance = {json.dumps(eq_bal[::4])};
 const eqEquity  = {json.dumps(eq_equity[::4])};
@@ -820,12 +716,12 @@ new Chart(document.getElementById('equityChart'), {{
       {{
         label: 'Equity',
         data: eqEquity,
-        borderColor: '#f5c518',
+        borderColor: '#00c9ff',
         borderWidth: 1.5,
         pointRadius: 0,
         tension: 0.2,
         fill: true,
-        backgroundColor: 'rgba(245,197,24,0.05)',
+        backgroundColor: 'rgba(0,201,255,0.05)',
       }},
       {{
         label: 'Balance',
@@ -853,7 +749,6 @@ new Chart(document.getElementById('equityChart'), {{
   }}
 }});
 
-// ── Monthly Bar ──────────────────────────────────────────────
 const mLabels = {json.dumps(m_labels)};
 const mValues = {json.dumps(m_values)};
 const mColors = [{','.join(m_colors)}];
@@ -862,12 +757,7 @@ new Chart(document.getElementById('monthlyChart'), {{
   type: 'bar',
   data: {{
     labels: mLabels,
-    datasets: [{{
-      label: 'Monthly P&L',
-      data: mValues,
-      backgroundColor: mColors,
-      borderRadius: 3,
-    }}]
+    datasets: [{{ label: 'Monthly P&L', data: mValues, backgroundColor: mColors, borderRadius: 3 }}]
   }},
   options: {{
     responsive: true,
@@ -893,30 +783,27 @@ new Chart(document.getElementById('monthlyChart'), {{
 
 if __name__ == "__main__":
     print("━" * 60)
-    print("  UT BOT GOLD BACKTESTER")
-    print(f"  Symbol: {SYMBOL} | TF: M15 | Period: 2 Years")
-    print(f"  Account: ${ACCOUNT_SIZE:,.0f} | Risk/Trade: ${RISK_USD}")
-    print(f"  Key: {KEY_VALUE} | ATR: {ATR_PERIOD} | RSI {RSI_BUY_LO}-{RSI_BUY_HI}/{RSI_SELL_LO}-{RSI_SELL_HI}")
+    print(f"  EMA CROSS BACKTESTER — {SYMBOL}")
+    print(f"  TF: M15 | Period: 2 Years | Account: ${ACCOUNT_SIZE:,.0f}")
+    print(f"  EMA {FAST_EMA}/{SLOW_EMA}/{TREND_EMA_LEN} | ADX {ADX_LEN}<{ADX_THRESHOLD} | SL Lookback {SL_LOOKBACK} | ATR Buffer {ATR_BUFFER}")
     print("━" * 60)
 
-    # 1. Fetch data
     df = fetch_data()
 
-    # 2. Build signals
     print("Calculating indicators & signals...")
     df = build_signals(df)
+    buys  = df["valid_buy"].sum()
+    sells = df["valid_sell"].sum()
+    print(f"Signals found — BUY: {buys} | SELL: {sells}")
 
-    # 3. Run backtest
     print("Running backtest engine...")
     trades_df, equity_df = run_backtest(df)
-    print(f"Done — {len(trades_df)} trades found")
+    print(f"Done — {len(trades_df)} trades executed")
 
-    # 4. Stats
     stats = compute_stats(trades_df, equity_df)
 
-    # 5. Print summary
     print("\n" + "═" * 60)
-    print("  BACKTEST RESULTS SUMMARY")
+    print(f"  RESULTS — {SYMBOL}")
     print("═" * 60)
     print(f"  Total Trades   : {stats.get('total_trades',0)}")
     print(f"  Win Rate       : {stats.get('win_rate',0)}%  ({stats.get('wins',0)}W / {stats.get('losses',0)}L)")
@@ -937,14 +824,12 @@ if __name__ == "__main__":
     print(f"  Max Loss Streak: {stats.get('max_loss_streak',0)}")
     print("═" * 60)
 
-    # 6. Save CSV
     if not trades_df.empty:
         trades_df.to_csv(OUTPUT_CSV, index=False)
-        print(f"\n✅ CSV saved  → {OUTPUT_CSV}")
+        print(f"\n✅ CSV  → {OUTPUT_CSV}")
 
-    # 7. Save HTML
     html = build_html(stats, trades_df, equity_df)
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"✅ HTML saved → {OUTPUT_HTML}")
-    print("\nOpen backtest_report.html in your browser to view the full report.")
+    print(f"✅ HTML → {OUTPUT_HTML}")
+    print("\nOpen the HTML file in your browser to view the full report.")
