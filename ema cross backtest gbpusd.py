@@ -1,6 +1,6 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- EMA CROSS STRATEGY — BACKTESTER  |  GBPUSD M15  |  2 Years
+ EMA CROSS STRATEGY — BACKTESTER  |  EURUSD M15  |  2 Years
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  Mirrors Pine Script logic exactly:
   • Fast EMA (20) × Slow EMA (50) crossover signals
@@ -11,8 +11,8 @@
   • $100 risk per trade   (lot = risk / (sl_pips × pip_value))
   • $100,000 starting account
  Outputs:
-  • backtest_report_GBPUSD_<ts>.html  — equity curve + charts
-  • backtest_trades_GBPUSD_<ts>.csv   — full trade-by-trade log
+  • backtest_report_EURUSD_<ts>.html  — equity curve + charts
+  • backtest_trades_EURUSD_<ts>.csv   — full trade-by-trade log
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -46,7 +46,7 @@ ATR_LEN           = 14
 SL_LOOKBACK       = 10               # bars to look back for swing high/low
 ATR_BUFFER        = 0.5              # ATR multiplier added to swing SL
 
-# Forex Pip Sizing  (GBPUSD — USD-quoted pair, USD account)
+# Forex Pip Sizing  (EURUSD — USD-quoted pair, USD account)
 PIP_SIZE          = 0.0001
 PIP_VALUE_PER_LOT = 10.0             # USD per pip per standard lot
 
@@ -217,7 +217,7 @@ def run_backtest(df):
         buy_sl_i  = row["buy_sl"]
         sell_sl_i = row["sell_sl"]
 
-        # ── Check SL / Trail hit (before signal) ─────────────
+        # ── Check SL hit (static — does not trail) ───────────
         sl_hit = False
 
         if trade_dir == 1 and sl_price is not None:
@@ -227,7 +227,6 @@ def run_backtest(df):
                 pnl         = calc_pnl(entry_price, exit_price, lot_size, True)
                 balance    += pnl
                 trade_id   += 1
-                trailing    = sl_price > entry_price
                 trades.append({
                     "id"          : trade_id,
                     "direction"   : "BUY",
@@ -239,7 +238,7 @@ def run_backtest(df):
                     "lot_size"    : lot_size,
                     "adx_entry"   : round(entry_adx,   1),
                     "pnl"         : pnl,
-                    "close_reason": "TRAIL HIT" if trailing else "SL HIT",
+                    "close_reason": "SL HIT",
                     "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
@@ -252,7 +251,6 @@ def run_backtest(df):
                 pnl         = calc_pnl(entry_price, exit_price, lot_size, False)
                 balance    += pnl
                 trade_id   += 1
-                trailing    = sl_price < entry_price
                 trades.append({
                     "id"          : trade_id,
                     "direction"   : "SELL",
@@ -264,18 +262,11 @@ def run_backtest(df):
                     "lot_size"    : lot_size,
                     "adx_entry"   : round(entry_adx,   1),
                     "pnl"         : pnl,
-                    "close_reason": "TRAIL HIT" if trailing else "SL HIT",
+                    "close_reason": "SL HIT",
                     "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
                 entry_price = sl_price = lot_size = entry_time = entry_adx = None
-
-        # ── ATR Trailing SL: ratchet in profit direction ──────
-        # Uses rolling swing SL (same formula as entry SL, updated each bar)
-        if not sl_hit and trade_dir == 1 and sl_price is not None:
-            sl_price = max(sl_price, buy_sl_i)
-        if not sl_hit and trade_dir == -1 and sl_price is not None:
-            sl_price = min(sl_price, sell_sl_i)
 
         # ── Signal logic ──────────────────────────────────────
         if not sl_hit:
@@ -367,9 +358,8 @@ def compute_stats(trades_df, equity_df):
     t    = trades_df
     wins = t[t["pnl"] > 0]
     losses = t[t["pnl"] <= 0]
-    sl_trades    = t[t["close_reason"] == "SL HIT"]
-    trail_trades = t[t["close_reason"] == "TRAIL HIT"]
-    rev_trades   = t[t["close_reason"] == "REVERSAL"]
+    sl_trades  = t[t["close_reason"] == "SL HIT"]
+    rev_trades = t[t["close_reason"] == "REVERSAL"]
 
     total_pnl    = t["pnl"].sum()
     final_bal    = ACCOUNT_SIZE + total_pnl
@@ -411,7 +401,6 @@ def compute_stats(trades_df, equity_df):
         "profit_factor"   : profit_factor,
         "sharpe"          : sharpe,
         "sl_hits"         : len(sl_trades),
-        "trail_hits"      : len(trail_trades),
         "reversals"       : len(rev_trades),
         "max_win_streak"  : max_win_streak,
         "max_loss_streak" : max_loss_streak,
@@ -443,7 +432,7 @@ def build_html(stats, trades_df, equity_df):
     rows = ""
     for _, r in trades_df.iterrows():
         pnl_cls     = "win" if r["pnl"] > 0 else "loss"
-        reason_icon = "🔄" if r["close_reason"] == "REVERSAL" else ("📈" if r["close_reason"] == "TRAIL HIT" else "🛑")
+        reason_icon = "🔄" if r["close_reason"] == "REVERSAL" else "🛑"
         rows += f"""
         <tr class="{pnl_cls}">
           <td>{int(r['id'])}</td>
@@ -668,7 +657,6 @@ def build_html(stats, trades_df, equity_df):
     <div class="stat-row"><span class="label">Profit Factor</span><span class="val">{s.get('profit_factor',0)}</span></div>
     <div class="stat-row"><span class="label">Sharpe Ratio</span><span class="val">{s.get('sharpe',0)}</span></div>
     <div class="stat-row"><span class="label">SL Hits</span><span class="val" style="color:var(--red)">{s.get('sl_hits',0)}</span></div>
-    <div class="stat-row"><span class="label">Trail Exits</span><span class="val" style="color:var(--green)">{s.get('trail_hits',0)}</span></div>
     <div class="stat-row"><span class="label">Reversals</span><span class="val">{s.get('reversals',0)}</span></div>
     <div class="stat-row"><span class="label">Risk/Trade</span><span class="val">$100</span></div>
   </div>
@@ -818,7 +806,6 @@ if __name__ == "__main__":
     print(f"  Best Trade     : ${stats.get('best_trade',0):,.2f}")
     print(f"  Worst Trade    : ${stats.get('worst_trade',0):,.2f}")
     print(f"  SL Hits        : {stats.get('sl_hits',0)}")
-    print(f"  Trail Exits    : {stats.get('trail_hits',0)}")
     print(f"  Reversals      : {stats.get('reversals',0)}")
     print(f"  Max Win Streak : {stats.get('max_win_streak',0)}")
     print(f"  Max Loss Streak: {stats.get('max_loss_streak',0)}")
