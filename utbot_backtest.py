@@ -38,8 +38,9 @@ RSI_BUY_HI    = 65
 RSI_SELL_LO   = 35
 RSI_SELL_HI   = 55
 YEARS_BACK    = 2
-OUTPUT_HTML   = "backtest_report.html"
-OUTPUT_CSV    = "backtest_trades.csv"
+_RUN_TS       = datetime.now().strftime("%Y%m%d%H%M%S")
+OUTPUT_HTML   = f"backtest_report_{_RUN_TS}.html"
+OUTPUT_CSV    = f"backtest_trades_{_RUN_TS}.csv"
 
 # ══════════════════════════════════════════════════════════════
 # DATA FETCH
