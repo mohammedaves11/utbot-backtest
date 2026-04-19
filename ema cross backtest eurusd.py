@@ -187,6 +187,29 @@ def calc_pnl(entry, exit_price, lots, is_buy):
     pips       = price_diff / PIP_SIZE
     return round(pips * PIP_VALUE_PER_LOT * lots, 2)
 
+
+def calc_mfe(entry, sl, exit_px, max_fav, is_buy):
+    """
+    Returns sl_pips, highest_rr, closed_rr.
+      sl_pips     — distance entry → SL in pips (your risk)
+      highest_rr  — peak favourable move as ratio string, e.g. "1:2.5"
+      closed_rr   — actual close as ratio string, e.g. "1:1.2" (negative = loss)
+    """
+    sl_dist_pips = abs(entry - sl) / PIP_SIZE
+    if is_buy:
+        exit_pips = (exit_px  - entry) / PIP_SIZE
+        mfe_pips  = max(0.0, (max_fav - entry) / PIP_SIZE)
+    else:
+        exit_pips = (entry  - exit_px) / PIP_SIZE
+        mfe_pips  = max(0.0, (entry - max_fav) / PIP_SIZE)
+    if sl_dist_pips > 0:
+        highest_rr = round(mfe_pips  / sl_dist_pips, 1)
+        closed_rr  = round(exit_pips / sl_dist_pips, 1)
+    else:
+        highest_rr = 0.0
+        closed_rr  = 0.0
+    return round(sl_dist_pips, 1), highest_rr, closed_rr
+
 # ══════════════════════════════════════════════════════════════
 # BACKTEST ENGINE
 # ══════════════════════════════════════════════════════════════
@@ -195,14 +218,15 @@ def run_backtest(df):
     trades       = []
     equity_curve = []
 
-    balance    = ACCOUNT_SIZE
-    trade_dir  = 0          # 1=long | -1=short | 0=flat
-    entry_price = None
-    sl_price    = None
-    entry_time  = None
-    lot_size    = None
-    entry_adx   = None
-    trade_id    = 0
+    balance       = ACCOUNT_SIZE
+    trade_dir     = 0          # 1=long | -1=short | 0=flat
+    entry_price   = None
+    sl_price      = None
+    entry_time    = None
+    lot_size      = None
+    entry_adx     = None
+    max_favorable = None       # MFE tracker: highest high (BUY) / lowest low (SELL)
+    trade_id      = 0
 
     # Warmup: need enough bars for TREND_EMA + ADX to settle
     warmup = max(TREND_EMA_LEN, SL_LOOKBACK) + 10
@@ -217,6 +241,12 @@ def run_backtest(df):
         buy_sl_i  = row["buy_sl"]
         sell_sl_i = row["sell_sl"]
 
+        # ── Update MFE each bar ───────────────────────────────
+        if trade_dir == 1 and max_favorable is not None:
+            max_favorable = max(max_favorable, high_i)
+        elif trade_dir == -1 and max_favorable is not None:
+            max_favorable = min(max_favorable, low_i)
+
         # ── Check SL hit (static — does not trail) ───────────
         sl_hit = False
 
@@ -227,6 +257,7 @@ def run_backtest(df):
                 pnl         = calc_pnl(entry_price, exit_price, lot_size, True)
                 balance    += pnl
                 trade_id   += 1
+                sl_pips_val, highest_rr, closed_rr = calc_mfe(entry_price, sl_price, exit_price, max_favorable, True)
                 trades.append({
                     "id"          : trade_id,
                     "direction"   : "BUY",
@@ -239,10 +270,14 @@ def run_backtest(df):
                     "adx_entry"   : round(entry_adx,   1),
                     "pnl"         : pnl,
                     "close_reason": "SL HIT",
+                    "sl_pips"     : sl_pips_val,
+                    "highest_rr"  : highest_rr,
+                    "closed_rr"   : closed_rr,
                     "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
                 entry_price = sl_price = lot_size = entry_time = entry_adx = None
+                max_favorable = None
 
         if trade_dir == -1 and sl_price is not None:
             if high_i >= sl_price:
@@ -251,6 +286,7 @@ def run_backtest(df):
                 pnl         = calc_pnl(entry_price, exit_price, lot_size, False)
                 balance    += pnl
                 trade_id   += 1
+                sl_pips_val, highest_rr, closed_rr = calc_mfe(entry_price, sl_price, exit_price, max_favorable, False)
                 trades.append({
                     "id"          : trade_id,
                     "direction"   : "SELL",
@@ -263,10 +299,14 @@ def run_backtest(df):
                     "adx_entry"   : round(entry_adx,   1),
                     "pnl"         : pnl,
                     "close_reason": "SL HIT",
+                    "sl_pips"     : sl_pips_val,
+                    "highest_rr"  : highest_rr,
+                    "closed_rr"   : closed_rr,
                     "balance"     : round(balance, 2),
                 })
                 trade_dir = 0
                 entry_price = sl_price = lot_size = entry_time = entry_adx = None
+                max_favorable = None
 
         # ── Signal logic ──────────────────────────────────────
         if not sl_hit:
@@ -278,6 +318,7 @@ def run_backtest(df):
                     pnl     = calc_pnl(entry_price, close_i, lot_size, False)
                     balance += pnl
                     trade_id += 1
+                    sl_pips_val, highest_rr, closed_rr = calc_mfe(entry_price, sl_price, close_i, max_favorable, False)
                     trades.append({
                         "id"          : trade_id,
                         "direction"   : "SELL",
@@ -290,16 +331,20 @@ def run_backtest(df):
                         "adx_entry"   : round(entry_adx,   1),
                         "pnl"         : pnl,
                         "close_reason": "REVERSAL",
+                        "sl_pips"     : sl_pips_val,
+                        "highest_rr"  : highest_rr,
+                        "closed_rr"   : closed_rr,
                         "balance"     : round(balance, 2),
                     })
 
                 # Open long
-                entry_price = close_i
-                sl_price    = buy_sl_i
-                lot_size    = calc_lot(entry_price, sl_price)
-                entry_time  = time_i
-                entry_adx   = row["adx"]
-                trade_dir   = 1
+                entry_price   = close_i
+                sl_price      = buy_sl_i
+                lot_size      = calc_lot(entry_price, sl_price)
+                entry_time    = time_i
+                entry_adx     = row["adx"]
+                trade_dir     = 1
+                max_favorable = high_i   # initialise MFE at entry bar
 
             # SELL trigger
             elif row["valid_sell"] and trade_dir != -1:
@@ -308,6 +353,7 @@ def run_backtest(df):
                     pnl     = calc_pnl(entry_price, close_i, lot_size, True)
                     balance += pnl
                     trade_id += 1
+                    sl_pips_val, highest_rr, closed_rr = calc_mfe(entry_price, sl_price, close_i, max_favorable, True)
                     trades.append({
                         "id"          : trade_id,
                         "direction"   : "BUY",
@@ -320,16 +366,20 @@ def run_backtest(df):
                         "adx_entry"   : round(entry_adx,   1),
                         "pnl"         : pnl,
                         "close_reason": "REVERSAL",
+                        "sl_pips"     : sl_pips_val,
+                        "highest_rr"  : highest_rr,
+                        "closed_rr"   : closed_rr,
                         "balance"     : round(balance, 2),
                     })
 
                 # Open short
-                entry_price = close_i
-                sl_price    = sell_sl_i
-                lot_size    = calc_lot(entry_price, sl_price)
-                entry_time  = time_i
-                entry_adx   = row["adx"]
-                trade_dir   = -1
+                entry_price   = close_i
+                sl_price      = sell_sl_i
+                lot_size      = calc_lot(entry_price, sl_price)
+                entry_time    = time_i
+                entry_adx     = row["adx"]
+                trade_dir     = -1
+                max_favorable = low_i    # initialise MFE at entry bar
 
         # ── Equity snapshot ───────────────────────────────────
         if trade_dir == 1 and entry_price:
@@ -433,6 +483,10 @@ def build_html(stats, trades_df, equity_df):
     for _, r in trades_df.iterrows():
         pnl_cls     = "win" if r["pnl"] > 0 else "loss"
         reason_icon = "🔄" if r["close_reason"] == "REVERSAL" else "🛑"
+        highest_rr  = r.get("highest_rr", 0.0)
+        closed_rr   = r.get("closed_rr",  0.0)
+        hrr_num = highest_rr if isinstance(highest_rr, (int, float)) else 0.0
+        hrr_col = "var(--green)" if hrr_num >= 2 else ("#f5c518" if hrr_num >= 1 else "var(--muted)")
         rows += f"""
         <tr class="{pnl_cls}">
           <td>{int(r['id'])}</td>
@@ -446,6 +500,9 @@ def build_html(stats, trades_df, equity_df):
           <td>{r['adx_entry']}</td>
           <td class="pnl-{'pos' if r['pnl']>0 else 'neg'}">${r['pnl']:,.2f}</td>
           <td>{reason_icon} {r['close_reason']}</td>
+          <td>{r.get('sl_pips', 0)}</td>
+          <td style="color:{hrr_col};font-weight:600">{highest_rr}</td>
+          <td>{closed_rr}</td>
           <td>${r['balance']:,.2f}</td>
         </tr>"""
 
@@ -678,7 +735,7 @@ def build_html(stats, trades_df, equity_df):
       <tr>
         <th>#</th><th>DIR</th><th>ENTRY TIME</th><th>EXIT TIME</th>
         <th>ENTRY</th><th>EXIT</th><th>SL</th><th>LOTS</th>
-        <th>ADX</th><th>P&L</th><th>REASON</th><th>BALANCE</th>
+        <th>ADX</th><th>P&L</th><th>REASON</th><th>SL PIPS</th><th>HIGHEST RR</th><th>CLOSED RR</th><th>BALANCE</th>
       </tr>
     </thead>
     <tbody>{rows}</tbody>
