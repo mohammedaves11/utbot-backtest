@@ -1,0 +1,31 @@
+XAUUSD UT Bot Backtest (Signal Exit) - Summary
+------------------------------------------
+Period                       2026-01-01  ->  2026-04-22
+Symbol / TF                  XAUUSD.t  /  15-Minute
+Exit Mode                    Opposite Signal (no fixed TP)
+Initial Equity ($)           100000.0
+Final Equity ($)             96880.32
+Total Return (%)             -3.12
+Total PnL ($)                -3119.64
+Total Trades                 588
+Win Rate (%)                 22.62
+Avg Win ($)                  586.66
+Avg Loss ($)                 -178.34
+Best Trade ($)               6612.9
+Worst Trade ($)              -199.96
+Profit Factor                0.96
+Max Drawdown (%)             -10.91
+Sharpe Ratio                 -0.21
+Max Win Streak               3
+Max Loss Streak              24
+Risk per Trade ($)           200.0
+SL Multiplier (ATR)          1.5
+------------------------------------------
+
+Strategy Parameters
+  Key Value (sensitivity)  : 3
+  ATR Period               : 14
+  SL multiplier            : 1.5x ATR
+  Take Profit              : Opposite signal only (no fixed TP)
+  Risk per trade           : $200 fixed
+  Initial equity           : $100,000

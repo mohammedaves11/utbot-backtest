@@ -1,0 +1,32 @@
+XAUUSD UT Bot Backtest – Summary
+──────────────────────────────────────────
+Period                       2024-04-21  →  2026-04-21
+Symbol / TF                  XAUUSD.t  /  15-Minute
+Initial Equity ($)           10000.0
+Final Equity ($)             9086.03
+Total Return (%)             -9.14
+Total PnL ($)                -913.75
+Total Trades                 5713
+Win Rate (%)                 35.59
+Avg Win ($)                  243.47
+Avg Loss ($)                 -134.75
+Best Trade ($)               1206.1
+Worst Trade ($)              -200.0
+Profit Factor                1.0
+Max Drawdown (%)             -72.92
+Sharpe Ratio                 0.31
+Max Win Streak               7
+Max Loss Streak              15
+Risk per Trade ($)           200.0
+SL Multiplier (ATR)          1.5
+Partial TP RR                1:2
+──────────────────────────────────────────
+
+Strategy Parameters
+  Key Value (sensitivity)  : 1
+  ATR Period               : 10
+  SL multiplier            : 1.5× ATR
+  Partial close at         : 1:2 RR  (50% of position)
+  Trail after partial      : 1.0× ATR
+  Risk per trade           : $200 fixed
+  Initial equity           : $10,000

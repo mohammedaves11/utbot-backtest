@@ -6,6 +6,8 @@
   • Fast EMA (20) × Slow EMA (50) crossover signals
   • 200 EMA Trend Filter  (above = buy only / below = sell only)
   • ADX Choppy Filter     (skip trade when ADX < 15)
+  • Choppiness Index      (skip trade when CI ≥ 61.8 — ranging market)
+  • ATR Ratio Filter      (skip trade when ATR < 80% of its 20-bar avg — dead market)
   • SL = Swing Low/High   (lookback 10) ± ATR×0.5 buffer
   • ATR Trailing SL       (ratchets SL in profit direction each bar)
   • $100 risk per trade   (lot = risk / (sl_pips × pip_value))
@@ -40,6 +42,16 @@ USE_TREND_FILTER  = True             # only buy above / sell below trend EMA
 USE_ADX           = True
 ADX_LEN           = 10
 ADX_THRESHOLD     = 15.0             # skip trades when ADX < this value
+
+# Choppiness Index Filter
+USE_CI            = True
+CI_LEN            = 14               # lookback period
+CI_THRESHOLD      = 61.8             # above = choppy market → skip trade
+
+# ATR Ratio Filter  (current ATR vs its own rolling average)
+USE_ATR_RATIO     = True
+ATR_RATIO_LEN     = 20               # bars for ATR baseline average
+ATR_RATIO_MIN     = 0.8              # skip if ATR < 80% of its average (quiet/dead market)
 
 # SL Settings
 ATR_LEN           = 14
@@ -128,6 +140,27 @@ def calc_adx(df, period):
     return adx
 
 
+def calc_choppiness(df, period):
+    """
+    Choppiness Index = 100 × log10(Σ TR(1) over N / (HH(N) − LL(N))) / log10(N)
+    Range 0–100.  Above 61.8 = choppy/ranging.  Below 38.2 = strong trend.
+    """
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    atr_sum = tr.rolling(period).sum()
+    hh      = high.rolling(period).max()
+    ll      = low.rolling(period).min()
+    denom   = (hh - ll).replace(0, np.nan)
+    ci      = 100 * np.log10(atr_sum / denom) / np.log10(period)
+    return ci
+
+
 def build_signals(df):
     close = df["close"]
 
@@ -136,6 +169,9 @@ def build_signals(df):
     trend_ema = close.ewm(span=TREND_EMA_LEN, adjust=False).mean()
     atr       = calc_atr(df, ATR_LEN)
     adx       = calc_adx(df, ADX_LEN)
+    ci        = calc_choppiness(df, CI_LEN)
+    atr_avg   = atr.rolling(ATR_RATIO_LEN).mean()
+    atr_ratio = atr / atr_avg.replace(0, np.nan)
 
     # EMA crossovers (match Pine Script ta.crossover / ta.crossunder)
     cross_bull = (fast_ema > slow_ema) & (fast_ema.shift(1) <= slow_ema.shift(1))
@@ -148,15 +184,21 @@ def build_signals(df):
     # ADX filter
     is_choppy = USE_ADX & (adx < ADX_THRESHOLD)
 
+    # Choppiness Index filter  (high CI = market is ranging)
+    is_ci_choppy  = USE_CI        & (ci >= CI_THRESHOLD)
+
+    # ATR Ratio filter  (ATR below its average = market is too quiet)
+    is_low_atr    = USE_ATR_RATIO & (atr_ratio < ATR_RATIO_MIN)
+
     # Swing SL levels (match Pine Script ta.lowest / ta.highest)
     swing_low  = df["low"].rolling(SL_LOOKBACK).min()
     swing_high = df["high"].rolling(SL_LOOKBACK).max()
     buy_sl     = swing_low  - atr * ATR_BUFFER
     sell_sl    = swing_high + atr * ATR_BUFFER
 
-    # Valid signals
-    valid_buy  = cross_bull & htf_buy_ok  & ~is_choppy
-    valid_sell = cross_bear & htf_sell_ok & ~is_choppy
+    # Valid signals  (all filters must pass)
+    valid_buy  = cross_bull & htf_buy_ok  & ~is_choppy & ~is_ci_choppy & ~is_low_atr
+    valid_sell = cross_bear & htf_sell_ok & ~is_choppy & ~is_ci_choppy & ~is_low_atr
 
     df = df.copy()
     df["fast_ema"]  = fast_ema
@@ -164,6 +206,8 @@ def build_signals(df):
     df["trend_ema"] = trend_ema
     df["atr"]       = atr
     df["adx"]       = adx
+    df["ci"]        = ci
+    df["atr_ratio"] = atr_ratio
     df["buy_sl"]    = buy_sl
     df["sell_sl"]   = sell_sl
     df["valid_buy"] = valid_buy

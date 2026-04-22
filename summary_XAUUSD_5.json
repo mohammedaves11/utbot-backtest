@@ -1,0 +1,20 @@
+{
+  "symbol": "XAUUSD",
+  "timeframe": "5",
+  "start": "2026-01-01",
+  "end": "2026-04-19",
+  "risk_usd": 100.0,
+  "account_size": 100000.0,
+  "total_closed": 210,
+  "open_trades": 1,
+  "wins": 65,
+  "losses": 145,
+  "win_rate_pct": 30.95,
+  "total_pnl": -1500.0,
+  "return_pct": -1.5,
+  "final_balance": 98500.0,
+  "profit_factor": 0.8966,
+  "expectancy": -7.14,
+  "max_drawdown": 2700.0,
+  "max_drawdown_pct": 2.7
+}

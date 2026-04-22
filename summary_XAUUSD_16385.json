@@ -1,0 +1,20 @@
+{
+  "symbol": "XAUUSD",
+  "timeframe": "16385",
+  "start": "2023-01-01",
+  "end": "2024-12-31",
+  "risk_usd": 100.0,
+  "account_size": 100000.0,
+  "total_closed": 148,
+  "open_trades": 0,
+  "wins": 52,
+  "losses": 96,
+  "win_rate_pct": 35.14,
+  "total_pnl": 800.0,
+  "return_pct": 0.8,
+  "final_balance": 100800.0,
+  "profit_factor": 1.0833,
+  "expectancy": 5.41,
+  "max_drawdown": 1200.0,
+  "max_drawdown_pct": 1.2
+}
