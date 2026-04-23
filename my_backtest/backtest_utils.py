@@ -31,7 +31,7 @@ DEFAULTS = dict(
     contract_size   = 100.0,      # Gold: 1 lot = 100 troy oz
     adx_len         = 14,         # ADX smoothing length
     adx_thresh      = 20,         # ADX threshold — below this = choppy, skip
-    filter_choppy   = True,       # True → skip signals when ADX < adx_thresh
+    filter_choppy   = False,       # True → skip signals when ADX < adx_thresh
     trail_mult      = 1.5,        # ATR multiplier for trailing stop (strategies 2/3/4)
     initial_balance = 100_000.0,  # Starting account equity in USD
 )
@@ -95,7 +95,7 @@ def load_csv(filepath: str,
     return df
 
 
-def load_mt5(symbol:        str = 'XAUUSD',
+def load_mt5(symbol:        str = 'XAUUSD.t',
              timeframe_str: str = 'M15',
              from_date          = None,
              to_date            = None) -> pd.DataFrame:
@@ -561,9 +561,16 @@ def generate_report(trades:          list,
     dist_b64 = _b64(fig3)
     plt.close(fig3)
 
+    # ── CSV export alongside HTML ──────────────────────────────────────────────
+    if not tdf.empty:
+        csv_path = output_path.replace('.html', '.csv')
+        tdf.to_csv(csv_path, index=False)
+        print(f"[CSV]     Saved → {csv_path}")
+
     # ── Trade table HTML ───────────────────────────────────────────────────────
     COLS = ['entry_time', 'exit_time', 'direction',
-            'entry_price', 'exit_price', 'sl_price', 'lots', 'pnl', 'exit_reason']
+            'entry_price', 'exit_price', 'sl_price', 'lots', 'pnl',
+            'highest_rr', 'closed_rr', 'exit_reason']
     show = [c for c in COLS if c in tdf.columns]
     trade_rows_html = ''
     if not tdf.empty:
@@ -580,6 +587,11 @@ def generate_report(trades:          list,
                     cells += f"<td>{v:.2f}</td>"
                 elif c == 'lots':
                     cells += f"<td>{v:.2f}</td>"
+                elif c == 'highest_rr':
+                    cells += f"<td style='color:#4da6ff'>{v:.2f}</td>"
+                elif c == 'closed_rr':
+                    col = '#00e5aa' if v >= 0 else '#ff4d4d'
+                    cells += f"<td style='color:{col}'>{v:.2f}</td>"
                 else:
                     cells += f"<td>{v}</td>"
             trade_rows_html += f"<tr class='{cls}'>{cells}</tr>\n"
@@ -709,7 +721,9 @@ tr:hover td{{background:#1c1c3c!important}}
 
 def _make_trade(entry_time, exit_time, direction,
                 entry_price, exit_price, sl_price,
-                lots, pnl, exit_reason) -> dict:
+                lots, pnl, exit_reason,
+                highest_rr: float = 0.0,
+                closed_rr:  float = 0.0) -> dict:
     """Build a standardised trade record."""
     return dict(
         entry_time  = entry_time,
@@ -720,5 +734,7 @@ def _make_trade(entry_time, exit_time, direction,
         sl_price    = round(float(sl_price),     2),
         lots        = round(float(lots),         2),
         pnl         = round(float(pnl),          2),
+        highest_rr  = round(float(highest_rr),   2),
+        closed_rr   = round(float(closed_rr),    2),
         exit_reason = exit_reason,
     )

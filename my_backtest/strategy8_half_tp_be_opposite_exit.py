@@ -3,8 +3,6 @@ strategy8_half_tp_be_opposite_exit.py
 =======================================
 Strategy 8 — 50 % at 1:2 (BE), Hold Runner Until Opposite Signal
 
-The best-of-both-worlds hybrid between Strategy 1 and Strategy 5.
-
 EXIT RULES
 ----------
   Before 1:2 : SL at entry ± (sl_mult × ATR).
@@ -20,15 +18,6 @@ EXIT RULES
 
 END OF DATA : Any open portion is closed at the last bar's close.
 
-WHY THIS COMBINATION WORKS
----------------------------
-  S1  → full position rides to opposite signal → high P&L, only 26% win rate
-  S5  → staged partials cap the runner early   → 52% win rate, lower P&L
-  S8  → banks 50% at 1:2 (boosts win rate)
-        lets remaining 50% run freely to opposite signal (preserves P&L)
-  Expected result: win rate ~40-45%, P&L closer to S1 than S5,
-                   drawdown similar to S5 because half is always banked.
-
 SAME-BAR PRIORITY (before 1:2)
 --------------------------------
   If bar_low <= SL  AND  bar_high >= TP1 on the same bar → SL treated as
@@ -41,34 +30,6 @@ TRADE-LOG ROWS
         or at BE SL             (exit_reason = 'SL (breakeven) — runner 50%')
         or at end of data       (exit_reason = 'End of data')
 
-ENTRY / EXIT GUIDE (live trading)
------------------------------------
-  ENTRY
-  ------
-  • Wait for BUY / SELL arrow on bar CLOSE.
-  • Place MARKET order at NEXT bar's OPEN.
-  • Set SL at:  entry − (sl_mult × ATR)  for LONG
-                entry + (sl_mult × ATR)  for SHORT
-  • Use your full calculated lot size (split mentally into two equal halves).
-
-  EXIT — LONG example (mirror for SHORT)
-  ----------------------------------------
-  TP1 reached  (price ≥ entry + 2 × SL_dist):
-    → Close HALF the position (50 %) at current market / limit at TP1.
-    → Move SL of remaining half to BREAKEVEN (entry price).
-
-  After TP1:
-    → Do NOT set any further TP — let the runner breathe.
-    → If price drops to entry (SL hit) → close remaining half, scratch.
-    → When opposite (SELL) signal fires on bar close:
-         → At NEXT bar's OPEN → close remaining half at market.
-
-  MT5 TIPS
-  ---------
-  Partial close : Right-click position in Trade tab
-                  → Close Position → enter 50 % of volume → OK
-  Move SL       : Right-click position → Modify → update Stop Loss to entry price
-
 Usage
 -----
 from backtest_utils import load_data
@@ -79,7 +40,7 @@ trades, equity, report = run_backtest(df, output_dir='reports')
 
 # CLI:
 python strategy8_half_tp_be_opposite_exit.py --source csv --csv XAUUSD_M15.csv
-python strategy8_half_tp_be_opposite_exit.py --source mt5 --symbol XAUUSD.t --tf M15
+python strategy8_half_tp_be_opposite_exit.py --source mt5 --symbol XAUUSD --tf M15
 """
 
 import os
@@ -111,7 +72,6 @@ def run_backtest(df:               pd.DataFrame,
                  initial_balance:  float = DEFAULTS['initial_balance'],
                  output_dir:       str   = 'reports',
                  symbol:           str   = 'XAUUSD',
-                 # trail_mult accepted for run_all.py compatibility, not used
                  trail_mult:       float = DEFAULTS['trail_mult']) -> tuple:
     """
     Run Strategy 8 backtest.
@@ -126,7 +86,7 @@ def run_backtest(df:               pd.DataFrame,
     contract_size : Contract size in oz (default 100)
     adx_len       : ADX smoothing period (default 14)
     adx_thresh    : Minimum ADX for a valid trend (default 20)
-    filter_choppy : Skip trades when ADX < adx_thresh (default False)
+    filter_choppy : Skip trades when ADX < adx_thresh (default True)
     initial_balance : Starting equity for equity-curve display
     output_dir    : Folder to save the HTML report
     symbol        : Symbol label used in the report
@@ -151,15 +111,15 @@ def run_backtest(df:               pd.DataFrame,
     position      = None        # None | 'long' | 'short'
     entry_price   = 0.0
     entry_time    = None
-    initial_sl    = 0.0         # original ATR-based SL at entry
+    initial_sl    = 0.0
     sl_price      = 0.0         # active SL — moves to BE after TP1
     sl_dist_entry = 0.0
-    lots          = 0.0         # full initial lot size
-    half          = 0.0         # 50 % tranche — set at entry
-    tp1_price     = 0.0         # 1:2 target
-    tp1_hit       = False       # True once 50 % has been closed
+    lots          = 0.0
+    half          = 0.0
+    tp1_price     = 0.0
+    tp1_hit       = False
+    max_excursion = 0.0
 
-    # 1-bar delay for opposite-signal exit of the runner
     opposite_pending_exit = False
 
     pending = None
@@ -188,6 +148,7 @@ def run_backtest(df:               pd.DataFrame,
             entry_price    = bar_open
             entry_time     = bar_time
             sl_dist_entry  = sl_d
+            max_excursion  = 0.0
 
             initial_sl = (entry_price - sl_d) if direction == 'long' \
                          else (entry_price + sl_d)
@@ -201,36 +162,39 @@ def run_backtest(df:               pd.DataFrame,
             pending               = None
 
         elif pending is not None:
-            pending = None   # already in position — discard
+            pending = None
 
         # ── B. Manage open LONG position ──────────────────────────────────────
         if position == 'long':
             exited = False
+            max_excursion = max(max_excursion, bar_high - entry_price)
+            h_rr = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
 
             # ── Phase 0: before TP1 ───────────────────────────────────────────
             if not tp1_hit:
-                # Conservative: check SL before TP1 on same bar
                 if bar_low <= sl_price:
-                    pnl = (sl_price - entry_price) * lots * contract_size
+                    pnl  = (sl_price - entry_price) * lots * contract_size
+                    c_rr = round((sl_price - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'long',
                         entry_price, sl_price, initial_sl,
-                        lots, pnl, 'SL hit'))
+                        lots, pnl, 'SL hit',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl
                     position = None
                     exited   = True
 
                 elif bar_high >= tp1_price:
-                    # Close 50 % at TP1
                     pnl_half = (tp1_price - entry_price) * half * contract_size
+                    c_rr     = round((tp1_price - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'long',
                         entry_price, tp1_price, initial_sl,
-                        half, pnl_half, 'TP1 (1:2) — 50% partial'))
+                        half, pnl_half, 'TP1 (1:2) — 50% partial',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_half
                     sl_price = entry_price   # move SL to breakeven
                     tp1_hit  = True
-                    # fall through to Phase 1 for same-bar opposite check
 
             # ── Phase 1: TP1 hit — hold runner until opposite signal ───────────
             if tp1_hit and not exited:
@@ -238,10 +202,12 @@ def run_backtest(df:               pd.DataFrame,
                 if opposite_pending_exit:
                     exit_p   = bar_open
                     pnl_run  = (exit_p - entry_price) * half * contract_size
+                    c_rr     = round((exit_p - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'long',
                         entry_price, exit_p, sl_price,
-                        half, pnl_run, 'Opposite signal — runner 50%'))
+                        half, pnl_run, 'Opposite signal — runner 50%',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_run
                     position = None
                     exited   = True
@@ -250,10 +216,12 @@ def run_backtest(df:               pd.DataFrame,
                 # Breakeven SL check on runner
                 if not exited and bar_low <= sl_price:
                     pnl_run = (sl_price - entry_price) * half * contract_size
+                    c_rr    = round((sl_price - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'long',
                         entry_price, sl_price, initial_sl,
-                        half, pnl_run, 'SL (breakeven) — runner 50%'))
+                        half, pnl_run, 'SL (breakeven) — runner 50%',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_run
                     position = None
                     exited   = True
@@ -268,25 +236,31 @@ def run_backtest(df:               pd.DataFrame,
         # ── C. Manage open SHORT position ─────────────────────────────────────
         elif position == 'short':
             exited = False
+            max_excursion = max(max_excursion, entry_price - bar_low)
+            h_rr = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
 
             # ── Phase 0: before TP1 ───────────────────────────────────────────
             if not tp1_hit:
                 if bar_high >= sl_price:
-                    pnl = (entry_price - sl_price) * lots * contract_size
+                    pnl  = (entry_price - sl_price) * lots * contract_size
+                    c_rr = round((entry_price - sl_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'short',
                         entry_price, sl_price, initial_sl,
-                        lots, pnl, 'SL hit'))
+                        lots, pnl, 'SL hit',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl
                     position = None
                     exited   = True
 
                 elif bar_low <= tp1_price:
                     pnl_half = (entry_price - tp1_price) * half * contract_size
+                    c_rr     = round((entry_price - tp1_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'short',
                         entry_price, tp1_price, initial_sl,
-                        half, pnl_half, 'TP1 (1:2) — 50% partial'))
+                        half, pnl_half, 'TP1 (1:2) — 50% partial',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_half
                     sl_price = entry_price
                     tp1_hit  = True
@@ -296,10 +270,12 @@ def run_backtest(df:               pd.DataFrame,
                 if opposite_pending_exit:
                     exit_p   = bar_open
                     pnl_run  = (entry_price - exit_p) * half * contract_size
+                    c_rr     = round((entry_price - exit_p) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'short',
                         entry_price, exit_p, sl_price,
-                        half, pnl_run, 'Opposite signal — runner 50%'))
+                        half, pnl_run, 'Opposite signal — runner 50%',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_run
                     position = None
                     exited   = True
@@ -307,10 +283,12 @@ def run_backtest(df:               pd.DataFrame,
 
                 if not exited and bar_high >= sl_price:
                     pnl_run = (entry_price - sl_price) * half * contract_size
+                    c_rr    = round((entry_price - sl_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                     trades.append(_make_trade(
                         entry_time, bar_time, 'short',
                         entry_price, sl_price, initial_sl,
-                        half, pnl_run, 'SL (breakeven) — runner 50%'))
+                        half, pnl_run, 'SL (breakeven) — runner 50%',
+                        highest_rr=h_rr, closed_rr=c_rr))
                     cumul   += pnl_run
                     position = None
                     exited   = True
@@ -344,15 +322,18 @@ def run_backtest(df:               pd.DataFrame,
         last_row  = sig.iloc[-1]
         last_time = sig.index[-1]
         last_cl   = last_row['close']
-        # Only the runner (half) remains if TP1 was hit; else full lots
         remaining = half if tp1_hit else lots
+        h_rr      = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
         if position == 'long':
-            pnl = (last_cl - entry_price) * remaining * contract_size
+            pnl  = (last_cl - entry_price) * remaining * contract_size
+            c_rr = round((last_cl - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
         else:
-            pnl = (entry_price - last_cl) * remaining * contract_size
+            pnl  = (entry_price - last_cl) * remaining * contract_size
+            c_rr = round((entry_price - last_cl) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
         trades.append(_make_trade(entry_time, last_time, position,
                                   entry_price, last_cl, sl_price,
-                                  remaining, pnl, 'End of data'))
+                                  remaining, pnl, 'End of data',
+                                  highest_rr=h_rr, closed_rr=c_rr))
         cumul += pnl
         eq_pts[last_time] = cumul
 
@@ -414,14 +395,13 @@ def main():
         epilog="""
 Examples:
   python strategy8_half_tp_be_opposite_exit.py --source csv --csv XAUUSD_M15.csv
-  python strategy8_half_tp_be_opposite_exit.py --source mt5 --symbol XAUUSD.t --tf M15
+  python strategy8_half_tp_be_opposite_exit.py --source mt5 --symbol XAUUSD --tf M15
   python strategy8_half_tp_be_opposite_exit.py --source csv --csv data.csv --sl-mult 2.0
         """)
     p.add_argument('--source',     choices=['csv', 'mt5'], default='csv')
     p.add_argument('--csv',        default='XAUUSD_M15.csv')
     p.add_argument('--symbol',     default='XAUUSD')
     p.add_argument('--tf',         default='M15')
-    p.add_argument('--bars',       type=int,   default=50_000)
     p.add_argument('--outdir',     default='reports')
     p.add_argument('--key-value',  type=float, default=DEFAULTS['key_value'])
     p.add_argument('--atr',        type=int,   default=DEFAULTS['atr_period'])
@@ -434,7 +414,7 @@ Examples:
     args = p.parse_args()
 
     df = load_data(source=args.source, csv_path=args.csv,
-                   symbol=args.symbol, timeframe=args.tf, n_bars=args.bars)
+                   symbol=args.symbol, timeframe=args.tf)
 
     trades, equity, report = run_backtest(
         df,

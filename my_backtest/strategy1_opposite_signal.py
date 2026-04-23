@@ -101,7 +101,9 @@ def run_backtest(df:               pd.DataFrame,
     entry_price   = 0.0
     entry_time    = None
     sl_price      = 0.0
+    sl_dist_entry = 0.0      # SL distance locked at entry (for RR calc)
     lots          = 0.0
+    max_excursion = 0.0      # max favourable price move from entry (for highest_rr)
 
     # Pending entry: set on signal bar, consumed on the NEXT bar's open
     pending = None   # dict with keys: direction, sl_dist, lot_size
@@ -123,14 +125,16 @@ def run_backtest(df:               pd.DataFrame,
 
         # ── A. Open pending entry at this bar's open ──────────────────────────
         if pending is not None and position is None:
-            direction = pending['direction']
-            sl_d      = pending['sl_dist']
-            position  = direction
-            entry_price = bar_open
-            entry_time  = bar_time
-            lots        = pending['lot_size']
-            sl_price    = (entry_price - sl_d) if direction == 'long' \
-                          else (entry_price + sl_d)
+            direction     = pending['direction']
+            sl_d          = pending['sl_dist']
+            position      = direction
+            entry_price   = bar_open
+            entry_time    = bar_time
+            lots          = pending['lot_size']
+            sl_dist_entry = sl_d
+            max_excursion = 0.0
+            sl_price      = (entry_price - sl_d) if direction == 'long' \
+                            else (entry_price + sl_d)
             pending = None
 
         elif pending is not None:
@@ -141,12 +145,18 @@ def run_backtest(df:               pd.DataFrame,
         exited = False
 
         if position == 'long':
+            # Update max favourable excursion this bar
+            max_excursion = max(max_excursion, bar_high - entry_price)
+            h_rr = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
+
             # B1. SL check (intrabar low)
             if bar_low <= sl_price:
-                pnl = (sl_price - entry_price) * lots * contract_size
+                pnl   = (sl_price - entry_price) * lots * contract_size
+                c_rr  = round((sl_price - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                 trades.append(_make_trade(entry_time, bar_time, 'long',
                                           entry_price, sl_price, sl_price,
-                                          lots, pnl, 'SL hit'))
+                                          lots, pnl, 'SL hit',
+                                          highest_rr=h_rr, closed_rr=c_rr))
                 cumul_pnl += pnl
                 equity_pts[bar_time] = cumul_pnl
                 position = None
@@ -154,10 +164,12 @@ def run_backtest(df:               pd.DataFrame,
 
             # B2. Opposite signal → exit at bar close, queue new short
             elif row['sell']:
-                pnl = (bar_close - entry_price) * lots * contract_size
+                pnl  = (bar_close - entry_price) * lots * contract_size
+                c_rr = round((bar_close - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                 trades.append(_make_trade(entry_time, bar_time, 'long',
                                           entry_price, bar_close, sl_price,
-                                          lots, pnl, 'Opposite signal'))
+                                          lots, pnl, 'Opposite signal',
+                                          highest_rr=h_rr, closed_rr=c_rr))
                 cumul_pnl += pnl
                 equity_pts[bar_time] = cumul_pnl
                 position = None
@@ -168,12 +180,18 @@ def run_backtest(df:               pd.DataFrame,
                                lot_size=row['lot_size'])
 
         elif position == 'short':
+            # Update max favourable excursion this bar
+            max_excursion = max(max_excursion, entry_price - bar_low)
+            h_rr = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
+
             # B1. SL check (intrabar high)
             if bar_high >= sl_price:
-                pnl = (entry_price - sl_price) * lots * contract_size
+                pnl  = (entry_price - sl_price) * lots * contract_size
+                c_rr = round((entry_price - sl_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                 trades.append(_make_trade(entry_time, bar_time, 'short',
                                           entry_price, sl_price, sl_price,
-                                          lots, pnl, 'SL hit'))
+                                          lots, pnl, 'SL hit',
+                                          highest_rr=h_rr, closed_rr=c_rr))
                 cumul_pnl += pnl
                 equity_pts[bar_time] = cumul_pnl
                 position = None
@@ -181,10 +199,12 @@ def run_backtest(df:               pd.DataFrame,
 
             # B2. Opposite signal → exit at bar close, queue new long
             elif row['buy']:
-                pnl = (entry_price - bar_close) * lots * contract_size
+                pnl  = (entry_price - bar_close) * lots * contract_size
+                c_rr = round((entry_price - bar_close) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
                 trades.append(_make_trade(entry_time, bar_time, 'short',
                                           entry_price, bar_close, sl_price,
-                                          lots, pnl, 'Opposite signal'))
+                                          lots, pnl, 'Opposite signal',
+                                          highest_rr=h_rr, closed_rr=c_rr))
                 cumul_pnl += pnl
                 equity_pts[bar_time] = cumul_pnl
                 position = None
@@ -214,16 +234,21 @@ def run_backtest(df:               pd.DataFrame,
         last_row  = sig.iloc[-1]
         last_time = sig.index[-1]
         last_cl   = last_row['close']
+        h_rr      = round(max_excursion / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
         if position == 'long':
-            pnl = (last_cl - entry_price) * lots * contract_size
+            pnl  = (last_cl - entry_price) * lots * contract_size
+            c_rr = round((last_cl - entry_price) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
             trades.append(_make_trade(entry_time, last_time, 'long',
                                       entry_price, last_cl, sl_price,
-                                      lots, pnl, 'End of data'))
+                                      lots, pnl, 'End of data',
+                                      highest_rr=h_rr, closed_rr=c_rr))
         else:
-            pnl = (entry_price - last_cl) * lots * contract_size
+            pnl  = (entry_price - last_cl) * lots * contract_size
+            c_rr = round((entry_price - last_cl) / sl_dist_entry, 2) if sl_dist_entry > 0 else 0.0
             trades.append(_make_trade(entry_time, last_time, 'short',
                                       entry_price, last_cl, sl_price,
-                                      lots, pnl, 'End of data'))
+                                      lots, pnl, 'End of data',
+                                      highest_rr=h_rr, closed_rr=c_rr))
         cumul_pnl += pnl
         equity_pts[last_time] = cumul_pnl
 
