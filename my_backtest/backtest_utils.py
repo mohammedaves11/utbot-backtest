@@ -302,6 +302,7 @@ def compute_indicators(df:            pd.DataFrame,
                         filter_choppy: bool = DEFAULTS['filter_choppy'],
                         risk_usd:     float = DEFAULTS['risk_usd'],
                         contract_size:float = DEFAULTS['contract_size'],
+
                         ) -> pd.DataFrame:
     """
     Compute all Pine Script indicator values and entry signals.
@@ -335,8 +336,12 @@ def compute_indicators(df:            pd.DataFrame,
     df  = df.copy()
     src = df['close']
 
-    atr   = _atr_wilder(df, atr_period)
-    nLoss = key_value * atr
+    #atr   = _atr_wilder(df, atr_period)
+    #nLoss = key_value * atr
+
+    atr    = _atr_wilder(df, atr_period)
+    atr_ma = atr.rolling(20).mean()          # ATR moving average for Filter 5
+    nLoss  = key_value * atr
 
     # ── ATR Trailing Stop (direct Python port of the Pine Script loop) ────────
     ts      = np.zeros(len(df))
@@ -372,7 +377,10 @@ def compute_indicators(df:            pd.DataFrame,
     lot_size = risk_usd / (sl_dist * contract_size)
     lot_size = lot_size.where(sl_dist > 0.0001, 0).round(2).clip(lower=0.01)
 
+    #df['atr']          = atr
+    #df['n_loss']       = nLoss
     df['atr']          = atr
+    df['atr_ma']       = atr_ma              # ← ADD THIS LINE
     df['n_loss']       = nLoss
     df['trailing_stop']= trailing_stop
     df['sl_dist']      = sl_dist

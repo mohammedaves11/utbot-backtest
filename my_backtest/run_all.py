@@ -65,7 +65,7 @@ CSV_CLOSE_COL = 'close'
 CSV_SEP       = ','    # column separator
 
 # ── MT5 settings (used when SOURCE = 'mt5') ───────────────────────────────────
-MT5_SYMBOL    = 'XAUUSD.t'         # your broker's exact symbol (e.g. 'XAUUSD.t')
+MT5_SYMBOL    = 'US30.t'         # your broker's exact symbol (e.g. 'XAUUSD.t')
 MT5_TIMEFRAME = 'M15'            # M1 M5 M15 M30 H1 H4 D1
 MT5_FROM_DATE = '2024-01-01'     # start date  'YYYY-MM-DD'
 MT5_TO_DATE   = '2026-04-24'     # end date    'YYYY-MM-DD'  (or 'today' for today)
@@ -73,22 +73,28 @@ MT5_TO_DATE   = '2026-04-24'     # end date    'YYYY-MM-DD'  (or 'today' for tod
 # ── Risk & indicator parameters ───────────────────────────────────────────────
 KEY_VALUE     = 3     # ATR sensitivity (Pine: 3)
 ATR_PERIOD    = 14     # ATR period      (Pine: 14)
-SL_MULT       = 1.5    # SL in ATR multiples (Pine: 1.5)
-TRAIL_MULT    = 1.5    # Trail ATR mult for strategies 2/3/4  (1.5 = tighter)
-RISK_USD      = 200.0  # $ risked per trade (Pine: 200)
-CONTRACT_SIZE = 100.0  # Gold: 1 lot = 100 oz
+SL_MULT       = 3.5   # SL in ATR multiples (Pine: 1.5)
+TRAIL_MULT    = 3.5    # Trail ATR mult for strategies 2/3/4  (1.5 = tighter)
+RISK_USD      = 400.0  # $ risked per trade (Pine: 200)
+CONTRACT_SIZE = 1.0  # Gold: 1 lot = 100 oz
 ADX_LEN       = 14     # ADX period
 ADX_THRESH    = 25     # ADX threshold — below = choppy, skip trade
 FILTER_CHOPPY = False   # True = use ADX filter (recommended)
 INITIAL_BALANCE = 100_000.0  # Starting account equity shown in equity curve ($)
 
 # ── Strategy 9 / 13 fixed-point TP settings ───────────────────────────────────
-S9_TP1_POINTS = 75.0
-S9_TP2_POINTS = 100.0
+S9_TP1_POINTS = 1200.0
+S9_TP2_POINTS = 1500.0
  
 # ── EMA filter settings (Strategies 10–13) ───────────────────────────────────
-EMA_FAST = 20   # fast EMA period
-EMA_SLOW = 50   # slow EMA period
+EMA_FAST = 9  # fast EMA period
+EMA_SLOW = 21   # slow EMA period
+
+# ── Filter 4 & 5 settings ─────────────────────────────────────────────────────
+EMA_SLOPE_BARS  = 3      # how many bars back to measure EMA slope
+MIN_ATR_RATIO   = 0.8    # current ATR must be >= 80% of its 20-bar average
+                          # set to 0.0 to disable ATR filter
+                          # set EMA_SLOPE_BARS to 0 to disable slope filter
 
 # ── Strategy 14 — Peak RR Trail settings ─────────────────────────────────────
 S14_MIN_RR_ACTIVATE = 5.0   # trail only activates once peak RR reaches this value
@@ -102,7 +108,7 @@ S15_TRAIL_PULLBACK  = 1.0   # close runner when price pulls back this many R fro
  
 
 # ── Which strategies to run (set False to skip) ───────────────────────────────
-RUN_S1 = True
+RUN_S1 = False
 RUN_S2 = False
 RUN_S3 = False
 RUN_S4 = False
@@ -111,10 +117,10 @@ RUN_S8 = False
 RUN_S9 = False
 RUN_S10 = False   # Strategy 1  + EMA 20/50
 RUN_S11 = False   # Strategy 5  + EMA 20/50
-RUN_S12 = True   # Strategy 8  + EMA 20/50
+RUN_S12 = False   # Strategy 8  + EMA 20/50
 RUN_S13 = True   # Strategy 9  + EMA 20/50
-RUN_S14 = True   # Peak RR Trail       + EMA filter  ← NEW
-RUN_S15 = True   # TP1 fixed + Peak RR Trail runner + EMA filter  ← NEW
+RUN_S14 = False   # Peak RR Trail       + EMA filter  ← NEW
+RUN_S15 = False   # TP1 fixed + Peak RR Trail runner + EMA filter  ← NEW
 
 # ── Output ─────────────────────────────────────────────────────────────────────
 SYMBOL     = 'XAUUSD'
@@ -178,7 +184,12 @@ def main():
     )
 
        # Extra kwargs only for EMA strategies (10–13)
-    ema_extra = dict(ema_fast=EMA_FAST, ema_slow=EMA_SLOW)
+    #ema_extra = dict(ema_fast=EMA_FAST, ema_slow=EMA_SLOW)
+    ema_extra = dict(
+    ema_fast       = EMA_FAST,
+    ema_slow       = EMA_SLOW,
+    ema_slope_bars = EMA_SLOPE_BARS,
+    min_atr_ratio  = MIN_ATR_RATIO,)   
  
 
     reports = {}

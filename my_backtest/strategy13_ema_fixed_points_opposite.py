@@ -69,6 +69,8 @@ def run_backtest(df:               pd.DataFrame,
                  symbol:           str   = 'XAUUSD',
                  ema_fast:         int   = 20,
                  ema_slow:         int   = 50,
+                 ema_slope_bars:   int   = 3,     # bars to measure EMA slope over
+                 min_atr_ratio:    float = 0.8,   # ATR must be >= 80% of its 20-bar avg
                  trail_mult:       float = DEFAULTS['trail_mult'],
                  tp1_points:       float = TP1_POINTS,
                  tp2_points:       float = TP2_POINTS) -> tuple:
@@ -127,6 +129,18 @@ def run_backtest(df:               pd.DataFrame,
         ema_s = row['ema_slow']
         price_above_emas = bar_close > ema_f and bar_close > ema_s
         price_below_emas = bar_close < ema_f and bar_close < ema_s
+
+        # ── Filter 4: EMA slope — slow EMA must slope in trade direction ────────
+        slope_i      = i - ema_slope_bars
+        ema_slope    = row['ema_slow'] - sig['ema_slow'].iloc[slope_i] \
+                       if slope_i >= 0 else 0.0
+        slope_long   = ema_slope > 0    # slow EMA rising  → allow longs
+        slope_short  = ema_slope < 0    # slow EMA falling → allow shorts
+
+        # ── Filter 5: ATR minimum — skip if market is too quiet/compressed ──────
+        atr_ma_val   = sig['atr_ma'].iloc[i]
+        atr_ok       = (row['atr'] >= min_atr_ratio * atr_ma_val) \
+                       if atr_ma_val > 0 else True
 
         # ── A. Open entry queued from previous bar ────────────────────────────
         if enter_next_bar is not None and position is None:
@@ -351,7 +365,7 @@ def run_backtest(df:               pd.DataFrame,
 
         # ── F. New signals (flat, no queued entry) ────────────────────────────
         if position is None and enter_next_bar is None and pending_direction is None:
-            if row['buy']:
+            if row['buy'] and atr_ok and slope_long:
                 if price_above_emas:
                     enter_next_bar = dict(direction='long',
                                           sl_dist=row['sl_dist'],
@@ -360,7 +374,7 @@ def run_backtest(df:               pd.DataFrame,
                     pending_direction = 'long'
                     pending_sl_dist   = row['sl_dist']
                     pending_lot_size  = row['lot_size']
-            elif row['sell']:
+            elif row['sell'] and atr_ok and slope_short:
                 if price_below_emas:
                     enter_next_bar = dict(direction='short',
                                           sl_dist=row['sl_dist'],
@@ -461,11 +475,13 @@ def main():
     p.add_argument('--contract',   type=float, default=DEFAULTS['contract_size'])
     p.add_argument('--adx-len',    type=int,   default=DEFAULTS['adx_len'])
     p.add_argument('--adx-thresh', type=int,   default=DEFAULTS['adx_thresh'])
-    p.add_argument('--no-filter',  action='store_true')
-    p.add_argument('--ema-fast',   type=int,   default=20)
-    p.add_argument('--ema-slow',   type=int,   default=50)
-    p.add_argument('--tp1',        type=float, default=TP1_POINTS)
-    p.add_argument('--tp2',        type=float, default=TP2_POINTS)
+    p.add_argument('--no-filter',       action='store_true')
+    p.add_argument('--ema-fast',        type=int,   default=20)
+    p.add_argument('--ema-slow',        type=int,   default=50)
+    p.add_argument('--tp1',             type=float, default=TP1_POINTS)
+    p.add_argument('--tp2',             type=float, default=TP2_POINTS)
+    p.add_argument('--ema-slope-bars',  type=int,   default=3)
+    p.add_argument('--min-atr-ratio',   type=float, default=0.8)
     args = p.parse_args()
 
     df = load_data(source=args.source, csv_path=args.csv,
@@ -473,14 +489,22 @@ def main():
 
     trades, equity, report = run_backtest(
         df,
-        key_value=args.key_value, atr_period=args.atr,
-        sl_mult=args.sl_mult, risk_usd=args.risk,
-        contract_size=args.contract,
-        adx_len=args.adx_len, adx_thresh=args.adx_thresh,
-        filter_choppy=not args.no_filter,
-        ema_fast=args.ema_fast, ema_slow=args.ema_slow,
-        tp1_points=args.tp1, tp2_points=args.tp2,
-        output_dir=args.outdir, symbol=args.symbol,
+        key_value       = args.key_value,
+        atr_period      = args.atr,
+        sl_mult         = args.sl_mult,
+        risk_usd        = args.risk,
+        contract_size   = args.contract,
+        adx_len         = args.adx_len,
+        adx_thresh      = args.adx_thresh,
+        filter_choppy   = not args.no_filter,
+        ema_fast        = args.ema_fast,
+        ema_slow        = args.ema_slow,
+        tp1_points      = args.tp1,
+        tp2_points      = args.tp2,
+        ema_slope_bars  = args.ema_slope_bars,
+        min_atr_ratio   = args.min_atr_ratio,
+        output_dir      = args.outdir,
+        symbol          = args.symbol,
     )
     print(f"  Report saved : {report}\n")
 

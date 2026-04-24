@@ -46,25 +46,25 @@ warnings.filterwarnings("ignore")
 
 # --- Symbols to backtest (MT5 symbol names - adjust for your broker) ---
 SYMBOLS = [
-    "NAS100",    # Nasdaq 100
-    "US500",     # S&P 500
-    "US30",      # Dow Jones
-    "XAUUSD",    # Gold
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
+  #  "USTEC.t",    # Nasdaq 100
+  # "US500.t",     # S&P 500
+   "US30.t",      # Dow Jones
+   # "XAUUSD.t",    # Gold
+    #"EURUSD.t",
+    #"GBPUSD.t",
+    #"USDJPY.t",
 ]
 
 # --- Timeframe (scalp: M1, M5, M15) ---
-TIMEFRAME = "M5"          # one of M1, M5, M15, M30, H1, H4, D1
-LOOKBACK_DAYS = 90        # how many days of history to pull per symbol
+TIMEFRAME = "M15"          # one of M1, M5, M15, M30, H1, H4, D1
+LOOKBACK_DAYS = 730        # how many days of history to pull per symbol (730 = 2 years)
 
 # --- Which protocols to run ---
 PROTOCOLS = ["T1", "S1", "S2", "S3"]   # subset of these four
 
 # --- Account / risk ---
-INITIAL_CAPITAL = 10_000.0
-RISK_PER_TRADE_PCT = 1.0       # % of equity risked per trade
+INITIAL_CAPITAL = 100000.0
+RISK_PER_TRADE_PCT = 0.2       # % of equity risked per trade
 COMMISSION_PER_LOT = 0.0       # round-trip commission in account currency
 SLIPPAGE_POINTS = 2            # points of slippage per fill
 
@@ -75,18 +75,15 @@ EMA_SLOPE_LEN   = 20
 BB_LENGTH       = 20
 BB_STDDEV       = 2.0
 ATR_PERIOD      = 14
-ATR_MULT        = 1.5
-ENTRY_PCT       = 1.5          # "% of Entry / Center Point"
-MAX_RR          = 2.0
+ATR_MULT        = 3.5
+ENTRY_PCT       = 3.5          # "% of Entry / Center Point"
+MAX_RR          = 2.0          # TP multiplier — e.g. 2.0 = 2:1 RR, 3.0 = 3:1 RR, 1.5 = 1.5:1 RR
 BREAKEVEN_PCT   = 0.0          # 0 = disabled ; e.g. 50 = move to BE at 50 % of TP
 BREAKOUT_BUFFER_TICKS  = 20
 MIN_4H_DISP_TICKS      = 30
 
-# --- Backtest constraints (from the indicator's input panel) ---
-MAX_RECENT_TRADES       = 110
-MIN_REQUIRED_TRADES     = 50
-MAX_CONSECUTIVE_LOSSES  = 5
-MIN_PROFIT_FACTOR       = 1.2
+# --- Backtest constraints ---
+MAX_CONSECUTIVE_LOSSES  = 5    # pause trading after this many losses in a row (set to 999 to disable)
 
 # --- Output ---
 OUTPUT_HTML = "oneshot_backtest_report.html"
@@ -163,7 +160,7 @@ def bollinger(series: pd.Series, length: int, stddev: float):
 
 
 def resample_4h(df: pd.DataFrame) -> pd.DataFrame:
-    return df.resample("4H").agg(
+    return df.resample("4h").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna()
 
@@ -612,7 +609,7 @@ def main():
 
         for proto in PROTOCOLS:
             trades, eq = backtest_symbol_protocol(df, sym, proto, INITIAL_CAPITAL)
-            key        = f"{sym} / {proto}"
+            key = f"{sym} / {proto}"
             all_trades[key] = trades
             all_equity[key] = eq
             all_stats[key]  = compute_stats(trades, eq, INITIAL_CAPITAL)
